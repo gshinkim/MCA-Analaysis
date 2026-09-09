@@ -55,8 +55,10 @@ export function downloadPNG(scale = 2){
 /** The Antimony source itself — the thing Tellurium actually loads. */
 export function downloadAntimony(){
   const src = document.querySelector('#model').value;
+  // name it after the model, not the clock, so a folder of these stays readable
+  const named = src.match(/^\s*model\s+\*?\s*([A-Za-z_]\w*)/m)?.[1];
   save(new Blob([src.endsWith('\n') ? src : src+'\n'], {type:'text/plain'}),
-       `model-${stamp()}.ant`);
+       (named || 'model-' + stamp()) + '.ant');
 }
 
 export function downloadCSV(){
@@ -82,6 +84,21 @@ export function initImport(onLoad){
     onLoad(text, f.name);
   };
   $('#openBtn').onclick = () => input.click();
+  $('#saveAntBtn').onclick = downloadAntimony;
+
+  // dropping a .ant on the editor is the obvious gesture; support it
+  const drop = $('#editorWrap');
+  const stop = e => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, e => {
+    stop(e); drop.classList.add('dropping'); }));
+  ['dragleave','drop'].forEach(ev => drop.addEventListener(ev, e => {
+    stop(e); drop.classList.remove('dropping'); }));
+  drop.addEventListener('drop', async e => {
+    const f = e.dataTransfer?.files?.[0];
+    if(!f) return;
+    const text = await f.text();
+    if(text.trim()) onLoad(text, f.name);
+  });
 }
 
 export function initExport(){

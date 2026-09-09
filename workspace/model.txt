@@ -1,19 +1,4 @@
-model threeStepLinear()
-
-    // ---- three reaction steps (all first-order, no feedback) ----------
-    v1: $Xo -> S1;   vo                     // constant supply into S1
-    v2: S1  -> S2;   k2*S1                  // first-order step 2
-    v3: S2  -> $X1;   k3*S2                 // first-order removal of S2
-
-    // ---- parameters ---------------------------------------------------
-    vo = 8      // supply rate
-    k2 = 1.0    // rate constant of step 2
-    k3 = 5.0    // rate constant of step 3
-
-    // ---- initial conditions -----------------------------------------
-    S1 = 0.1
-    S2 = 0.1
-    Xo = 0
-    X1 = 0
-
+model dropped()
+  A -> B; k*A
+  A=3; B=0; k=0.4
 end

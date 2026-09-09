@@ -98,6 +98,7 @@ const routes = {
       readdir(join(ROOT, 'skills')).catch(() => []),
     ]);
     json(res, 200, {
+      hosted: HOSTED,
       tellurium: te.installed ? ver : { error: 'not installed — run: bash setup.sh' },
       telluriumInstalled: te.installed,
       claude: claude ? { path: claude } : { error: 'claude CLI not found on PATH' },

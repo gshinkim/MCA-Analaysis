@@ -129,10 +129,15 @@ def _stability(r):
         vals = [complex(v) for v in r.getFullEigenValues()]
     except Exception as e:
         return {"error": str(e)[:200]}
+    hi = max(v.real for v in vals)
+    # A conserved quantity gives an eigenvalue of exactly zero. That is marginal,
+    # not unstable - calling it unstable made a plain A -> B look divergent.
+    tol = 1e-9
     return {
         "eigenvalues": [[v.real, v.imag] for v in vals],
-        "maxRealPart": max(v.real for v in vals),
-        "stable": all(v.real < 0 for v in vals),
+        "maxRealPart": hi,
+        "stable": hi < tol,
+        "marginal": abs(hi) <= tol,
         "oscillatory": any(abs(v.imag) > 1e-9 for v in vals),
     }
 
@@ -181,7 +186,7 @@ def do_settle(q):
     # An unstable fixed point is never reached by integrating, however far you go -
     # that is what used to run the horizon out to 1e6 and kill CVODE. Say so, and
     # show the behaviour the system actually has instead.
-    if stability.get("stable") is False:
+    if stability.get("stable") is False:   # genuinely unstable, not merely marginal
         r.resetToOrigin()
         apply_overrides(r, over)
         out_names, cols, _ = simulate_safe(r, over, 0, requested_end, points)

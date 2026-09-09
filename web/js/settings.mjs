@@ -44,7 +44,10 @@ export function resolveModel(sel){
 }
 
 export function modelOptions(){
-  const s=settings(), out=BUILTIN.map(b=>({ v:'cc:'+b.id, t:b.t }));
+  const s=settings();
+  // Hosted runs Tellurium only; the Claude Code runtime needs the local CLI, so
+  // offering it there would just fail on send.
+  const out = S.env?.hosted ? [] : BUILTIN.map(b=>({ v:'cc:'+b.id, t:b.t }));
   s.endpoints.forEach((e,i)=>(e.models||'').split(',').map(m=>m.trim()).filter(Boolean)
     .forEach(m=>out.push({ v:'ep:'+i+'|'+m, t:(e.name||'Endpoint')+' · '+m })));
   const local = s.localCfg;
@@ -67,7 +70,11 @@ export function fillModels(){
   [$('#modelPick'),$('#modelPick2')].forEach(sel=>{
     sel.textContent='';
     opts.forEach(o=>{ const e=document.createElement('option'); e.value=o.v; e.textContent=o.t; sel.append(e); });
-    sel.value = opts.some(o=>o.v===cur) ? cur : opts[0].v;
+    if(!opts.length){
+      const e=document.createElement('option');
+      e.value=''; e.textContent='No model — open Settings'; sel.append(e);
+    }
+    sel.value = opts.some(o=>o.v===cur) ? cur : (opts[0]?.v ?? '');
   });
   store.set('modelSel', $('#modelPick').value);
 }
