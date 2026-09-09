@@ -1,0 +1,6 @@
+.venv
+.git
+node_modules
+workspace/runs
+*.log
+.DS_Store

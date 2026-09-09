@@ -1,0 +1,60 @@
+const post = async (url, body) => {
+  const r = await fetch(url, { method:'POST', headers:{'content-type':'application/json'},
+                               body: JSON.stringify(body) });
+  return r.json();
+};
+
+export const getEnv      = ()      => fetch('/api/env').then(r=>r.json());
+export const getModel    = ()      => fetch('/api/model').then(r=>r.json());
+export const putModel    = src     => fetch('/api/model', { method:'PUT',
+  headers:{'content-type':'application/json'}, body: JSON.stringify({src}) }).then(r=>r.json());
+export const putSettings = s       => fetch('/api/settings', { method:'PUT',
+  headers:{'content-type':'application/json'}, body: JSON.stringify(s) }).then(r=>r.json());
+
+export const simulate = q => post('/api/simulate', q);
+export const steady   = q => post('/api/steady', q);
+export const settle   = q => post('/api/settle', q);
+export const mca      = q => post('/api/mca', q);
+
+/** One agent turn, streamed as server-sent events. Returns an abort function. */
+export function chat({ message, sessionId, model, env, runtime, chatCfg, useWorkflow }, onEvent){
+  const ctrl = new AbortController();
+  (async () => {
+    let res;
+    try{
+      res = await fetch('/api/chat', { method:'POST', signal: ctrl.signal,
+        headers:{'content-type':'application/json'},
+        body: JSON.stringify({ message, sessionId, model, env, runtime, chatCfg, useWorkflow }) });
+    }catch(e){
+      if(e.name!=='AbortError') onEvent({type:'fatal', error:String(e.message||e)});
+      return;
+    }
+    if(!res.ok || !res.body){
+      // the server explains misconfiguration in JSON; don't flatten it to a status code
+      let msg = 'chat failed: HTTP '+res.status;
+      try{ const j = await res.json(); if(j?.error) msg = j.error; }catch{}
+      onEvent({type:'fatal', error: msg});
+      onEvent({type:'done', code:1});
+      return;
+    }
+    const rd = res.body.getReader(), dec = new TextDecoder();
+    let buf='';
+    for(;;){
+      let chunk;
+      try{ chunk = await rd.read(); }
+      catch(e){ if(e.name!=='AbortError') onEvent({type:'fatal', error:String(e.message||e)}); break; }
+      if(chunk.done) break;
+      buf += dec.decode(chunk.value, {stream:true});
+      let i;
+      while((i = buf.indexOf('\n\n')) >= 0){
+        const frame = buf.slice(0,i); buf = buf.slice(i+2);
+        for(const line of frame.split('\n')){
+          if(!line.startsWith('data:')) continue;
+          try{ onEvent(JSON.parse(line.slice(5).trim())); }catch{}
+        }
+      }
+    }
+    onEvent({type:'closed'});
+  })();
+  return () => ctrl.abort();
+}
