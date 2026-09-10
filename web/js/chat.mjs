@@ -150,8 +150,10 @@ function send(){
       }
   };
 
-  if(rt.runtime === 'openai'){
-    // inference happens on the user's own machine; only Tellurium is server-side
+  if(rt.runtime === 'openai' && S.env?.hosted){
+    // Hosted: this server is not the user's machine, so it cannot reach their model
+    // runtime. The agent runs in the page instead — which is why a hosted setup still
+    // needs the model server to allow this origin. Locally we never take that path.
     const a = runBrowserAgent({
       cfg: rt.chatCfg, prompt: v, useWorkflow: useWorkflow(),
       getModel: () => $('#model').value,

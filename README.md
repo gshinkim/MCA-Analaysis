@@ -31,6 +31,9 @@ The site is hosted; **the AI is not**. Inference runs on the researcher's own
 machine and the browser talks to it directly, so the server never sees a key, a
 prompt, or a token — it only runs Tellurium.
 
+This section is about a *hosted* deployment. Running locally needs none of it —
+see [Using a local model](#using-a-local-model).
+
 ```
 browser ──► http://localhost:11434   inference (their laptop, their GGUF)
         └─► https://your-site/api    simulate · steady · mca   (Tellurium)
@@ -117,12 +120,41 @@ agent cannot quietly take the slow path anyway.
 `.claude/{agents,skills,workflows}` are symlinks, so anything you drop into
 `skills/` is live on the next turn — no restart, no copy step.
 
+### Using a local model
+
+Locally there is nothing to configure. On load the page calls `GET /api/local/scan`
+and **this server** — not the browser — probes the ports a local runtime listens on
+out of the box:
+
+| | |
+|---|---|
+| Ollama | `11434` |
+| LM Studio | `1234` |
+| `llama-server` | `8080` |
+| vLLM | `8000` |
+
+Whatever answers shows up in the model picker as `Ollama · qwen3:8b`; pick it and
+the turn is proxied through `POST /api/chat`. Because the page only ever talks to
+its own origin, **none of the browser-side requirements apply**: no `OLLAMA_ORIGINS`,
+no CORS toggle, no Chrome local-network prompt.
+
+If nothing is running, Settings → Local models → **Start Ollama** launches the
+daemon for you (`POST /api/local/start` spawns `ollama serve` detached and waits for
+the port). Models still have to exist on disk — `ollama pull qwen3:8b` — because
+that is a multi-gigabyte download and not something to start behind a button.
+
+The browser-direct path in [Deploying it](#deploying-it) is only for a **hosted**
+deployment, where the server is not the user's machine and genuinely cannot reach
+their runtime. That is the case that needs the CORS flag and the permission prompt.
+
 ### Picking local model files
 
-The Settings → Local models tab has a **Browse…** button. A browser cannot reveal a
-real filesystem path from `<input type=file>`, so `GET /api/fs` lists directories
-server-side and the picker returns an absolute path. **Test & list models** probes
-an endpoint's `/v1/models` and fills in the model list for you.
+Everything below is the manual fallback, for a runtime on a port we do not scan or
+a machine that is not this one. The Settings → Local models tab has a **Browse…**
+button. A browser cannot reveal a real filesystem path from `<input type=file>`, so
+`GET /api/fs` lists directories server-side and the picker returns an absolute path.
+**Test & list models** probes an endpoint's `/v1/models` and fills in the model list
+for you.
 
 A `.gguf` file is weights, not a server — serve it first
 (`llama-server -m <file> --port 8080`, or `lms load <file>`) and point the URL at it.

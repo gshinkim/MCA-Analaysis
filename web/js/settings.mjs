@@ -31,6 +31,11 @@ export function resolveModel(sel){
     return { runtime:'claude-code', model: sel ? sel.slice(3) : 'opus' };
   const [kind, ...rest] = sel.split(':');
   const model = rest.join(':');
+  // 'auto:<baseUrl>|<model>' — a runtime found by /api/local/scan, nothing saved
+  if(kind==='auto'){
+    const i = model.lastIndexOf('|');
+    return { runtime:'openai', chatCfg:{ baseUrl: model.slice(0,i), model: model.slice(i+1) } };
+  }
   if(kind==='ep'){
     const i = +model.split('|')[0], name = model.split('|').slice(1).join('|');
     const ep = s.endpoints[i];
@@ -48,6 +53,10 @@ export function modelOptions(){
   // Hosted runs Tellurium only; the Claude Code runtime needs the local CLI, so
   // offering it there would just fail on send.
   const out = S.env?.hosted ? [] : BUILTIN.map(b=>({ v:'cc:'+b.id, t:b.t }));
+  // found on this machine, no settings needed — listed after the built-ins so a
+  // scan never silently changes which model is selected
+  (S.local?.servers ?? []).forEach(sv => sv.models.forEach(m =>
+    out.push({ v:'auto:'+sv.base+'|'+m, t: sv.kind+' · '+m })));
   s.endpoints.forEach((e,i)=>(e.models||'').split(',').map(m=>m.trim()).filter(Boolean)
     .forEach(m=>out.push({ v:'ep:'+i+'|'+m, t:(e.name||'Endpoint')+' · '+m })));
   const local = s.localCfg;
@@ -77,6 +86,47 @@ export function fillModels(){
     sel.value = opts.some(o=>o.v===cur) ? cur : (opts[0]?.v ?? '');
   });
   store.set('modelSel', $('#modelPick').value);
+}
+
+/* ---- what is already running on this machine ---- */
+/* The server does the looking, so a local model needs no CORS flag, no
+   OLLAMA_ORIGINS, and no browser local-network prompt: press nothing, and if
+   Ollama or LM Studio is up its models are simply in the picker. */
+export async function refreshLocal(){
+  try { S.local = await api.scanLocal(); } catch { S.local = null; }
+  fillModels(); renderFound();
+  return S.local;
+}
+
+function renderFound(){
+  const box = $('#locFound'); if(!box) return;
+  const L = S.local, up = L?.servers ?? [];
+  const n = up.reduce((a,s)=>a+s.models.length, 0);
+  const detail =
+      L?.hosted ? 'This is a hosted deployment — it cannot see your machine. Use the settings below.'
+    : n         ? up.map(s=>s.kind+' ('+s.models.length+')').join(', ') +
+                  ' — already in the model picker, nothing to configure.'
+    : up.length ? up.map(s=>s.kind).join(', ')+' is running but serves no model yet.'
+    : L?.ollama ? 'Ollama is installed but not running.'
+    :             'Nothing found. Install Ollama, then press Start.';
+  box.innerHTML =
+    '<div class="envrow"><span class="dot'+(n?'':' err')+'"></span><b>On this machine</b>'+
+    '<span class="hint" style="margin:0">'+detail+'</span></div>'+
+    (L?.hosted ? '' :
+      '<div style="margin:8px 0 4px"><button class="btn sm" id="locStart">'+
+      (n ? 'Rescan' : 'Start Ollama')+'</button> <span class="probe" id="locMsg"></span></div>')+
+    (!L?.hosted && !n ?
+      '<p class="hint">A model still has to exist locally: <code>ollama pull qwen3:8b</code>.</p>' : '');
+  const b = $('#locStart'); if(!b) return;
+  b.onclick = async () => {
+    const msg = $('#locMsg'); msg.className='probe'; msg.textContent='Starting…'; b.disabled=true;
+    const r = await api.startLocal().catch(e=>({ ok:false, error:String(e.message||e) }));
+    if(!r.ok){ b.disabled=false; msg.className='probe bad'; msg.textContent='✕ '+r.error; return; }
+    await refreshLocal();                       // re-renders this whole block
+    const m = $('#locMsg'); if(m){ m.className='probe ok';
+      m.textContent = r.models?.length ? '✓ '+r.models.length+' model'+(r.models.length===1?'':'s')+' ready'
+                                       : '✓ running — now pull a model'; }
+  };
 }
 
 /* ---- endpoints tab ---- */
@@ -171,7 +221,7 @@ function renderLocal(){
 /* ---- drawer ---- */
 export function openSettings(){
   draft = structuredClone(settings());
-  renderEndpoints(); renderLocal(); renderEnv();
+  renderEndpoints(); renderLocal(); renderEnv(); renderFound();
   $('#wfToggle').checked = draft.useWorkflow !== false;
   $('#wfToggle').onchange = e => { draft.useWorkflow = e.target.checked; };
   $('#settings').classList.add('on'); $('#scrim').classList.add('on');

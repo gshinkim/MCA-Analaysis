@@ -3,7 +3,7 @@ import { S } from './state.mjs';
 import * as api from './api.mjs';
 import { draw, initChartInteractions } from './chart.mjs';
 import { renderControls, initAccordions, setOnChange } from './panel.mjs';
-import { initSettings, fillModels, closeSettings, refreshEnv } from './settings.mjs';
+import { initSettings, fillModels, closeSettings, refreshEnv, refreshLocal } from './settings.mjs';
 import { initChat, toggleChat, setOnModelChanged } from './chat.mjs';
 import { initExport, initImport } from './export.mjs';
 
@@ -218,8 +218,12 @@ setOnModelChanged(src=>{ editor.value = src; run(); });
   const m = await api.getModel();
   editor.value = m.src;
 
+  refreshLocal();          // whatever is already running here lands in the picker
+
   api.getEnv().then(e=>{
-    S.env = e; refreshEnv();
+    // the picker is built before this resolves, and on a hosted deployment the
+    // built-in Claude models must drop out of it
+    S.env = e; refreshEnv(); fillModels();
     if(!e.telluriumInstalled) status('err','Tellurium not installed — run: bash setup.sh');
     if(e.claude.error) $('#aiBar').title = e.claude.error;
   });

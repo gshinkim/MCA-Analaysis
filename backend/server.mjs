@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, stat, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { Tellurium } from './tellurium.mjs';
 import { runAgent, toUiEvent } from './agent.mjs';
 import { runLocalAgent } from './local-agent.mjs';
@@ -65,6 +65,35 @@ const modelVersion = async () => { try { return (await stat(MODEL_FILE)).mtimeMs
 
 const which = cmd => new Promise(r =>
   execFile('sh', ['-lc', `command -v ${cmd}`], (e, out) => r(e ? null : out.trim())));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* Ask an OpenAI-compatible server what it serves. Done here rather than in the
+   page: the browser reaching localhost needs OLLAMA_ORIGINS or a CORS setting on
+   the model server plus Chrome's local-network prompt, and this server needs
+   none of it. */
+async function probeOai(baseUrl, apiKey, ms = 6000) {
+  let url = String(baseUrl || '').replace(/\/+$/, '');
+  if (!url) return { ok: false, error: 'no URL' };
+  if (!/\/v\d+$/.test(url)) url += '/v1';
+  try {
+    const r = await fetch(url + '/models', { signal: AbortSignal.timeout(ms),
+      headers: apiKey ? { authorization: 'Bearer ' + apiKey } : {} });
+    if (!r.ok) return { ok: false, error: 'HTTP ' + r.status + ' from ' + url };
+    const j = await r.json();
+    return { ok: true, url, models: (j.data ?? j.models ?? []).map(m => m.id ?? m.name).filter(Boolean) };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+// Where a local runtime listens if you installed it and changed nothing.
+const OLLAMA = 'http://127.0.0.1:11434';
+const KNOWN = [
+  { kind: 'Ollama',    base: OLLAMA },
+  { kind: 'LM Studio', base: 'http://127.0.0.1:1234' },
+  { kind: 'llama.cpp', base: 'http://127.0.0.1:8080' },
+  { kind: 'vLLM',      base: 'http://127.0.0.1:8000' },
+];
 
 /* ------------------------------- static ------------------------------- */
 // The browser agent loads its prompt, workflow and Skills over HTTP, so these
@@ -163,17 +192,38 @@ const routes = {
   'POST /api/probe': async (req, res) => {
     const { baseUrl, apiKey } = await body(req);
     if (!baseUrl) return json(res, 400, { ok: false, error: 'baseUrl is required' });
-    let url = String(baseUrl).replace(/\/+$/, '');
-    if (!/\/v\d+$/.test(url)) url += '/v1';
-    try {
-      const r = await fetch(url + '/models', { signal: AbortSignal.timeout(6000),
-        headers: apiKey ? { authorization: 'Bearer ' + apiKey } : {} });
-      if (!r.ok) return json(res, 200, { ok: false, error: 'HTTP ' + r.status + ' from ' + url });
-      const j = await r.json();
-      json(res, 200, { ok: true, url, models: (j.data ?? j.models ?? []).map(m => m.id ?? m.name).filter(Boolean) });
-    } catch (e) {
-      json(res, 200, { ok: false, error: String(e.message || e) + ' — is the server running?' });
+    const r = await probeOai(baseUrl, apiKey);
+    json(res, 200, r.ok ? r : { ...r, error: r.error + ' — is the server running?' });
+  },
+
+  /* Every local runtime already listening, found without the user configuring
+     anything. This is what makes a local model plug-and-play: the page picks a
+     model from here and the turn is proxied through this server, so the model
+     server never sees a browser origin and never needs a CORS flag. */
+  'GET /api/local/scan': async (req, res) => {
+    if (HOSTED) return json(res, 200, { hosted: true, servers: [], ollama: null });
+    const servers = (await Promise.all(KNOWN.map(async k => {
+      const r = await probeOai(k.base, '', 1500);
+      return r.ok ? { ...k, models: r.models } : null;
+    }))).filter(Boolean);
+    json(res, 200, { hosted: false, servers, ollama: await which('ollama') });
+  },
+
+  /* Start Ollama for the user instead of telling them to open a terminal. */
+  'POST /api/local/start': async (req, res) => {
+    if (HOSTED) return json(res, 400, { ok: false, error: 'not available on a hosted deployment' });
+    const up = await probeOai(OLLAMA, '', 1200);
+    if (up.ok) return json(res, 200, { ok: true, already: true, models: up.models });
+    const bin = await which('ollama');
+    if (!bin) return json(res, 200, { ok: false,
+      error: 'Ollama is not installed on this machine. Install it from https://ollama.com/download, then press Start again.' });
+    spawn(bin, ['serve'], { detached: true, stdio: 'ignore' }).unref();
+    for (let i = 0; i < 15; i++) {
+      await sleep(400);
+      const r = await probeOai(OLLAMA, '', 1000);
+      if (r.ok) return json(res, 200, { ok: true, models: r.models });
     }
+    json(res, 200, { ok: false, error: 'started ollama, but nothing came up on port 11434' });
   },
 
   /* Server-sent events: one agent turn, streamed. */

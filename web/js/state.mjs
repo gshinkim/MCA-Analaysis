@@ -6,6 +6,7 @@ export const S = {
   panning: false,
   lastRunMs: 0,
   env: null,             // /api/env
+  local: null,           // /api/local/scan — runtimes found on this machine
   sessionId: null,       // agent session, kept so the chat has memory
   defaultCfg: null,      // frozen default config
 };

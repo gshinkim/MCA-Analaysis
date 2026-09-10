@@ -11,6 +11,11 @@ export const putModel    = src     => fetch('/api/model', { method:'PUT',
 export const putSettings = s       => fetch('/api/settings', { method:'PUT',
   headers:{'content-type':'application/json'}, body: JSON.stringify(s) }).then(r=>r.json());
 
+/* Local runtimes are found and driven by our own server, so the page never talks
+   to localhost itself — no CORS flag on the model server, no browser prompt. */
+export const scanLocal  = ()      => fetch('/api/local/scan').then(r=>r.json());
+export const startLocal = ()      => post('/api/local/start', {});
+
 export const simulate = q => post('/api/simulate', q);
 export const steady   = q => post('/api/steady', q);
 export const settle   = q => post('/api/settle', q);
