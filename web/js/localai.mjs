@@ -33,6 +33,20 @@ export async function permissionState(){
 }
 
 /**
+ * One command per runtime that makes it accept this site — a terminal command for
+ * each, not a paragraph mixing all three. `origin` is this exact deployment, so the
+ * Ollama line can be pasted as-is.
+ */
+export const corsCommands = (origin = location.origin) => [
+  { app: 'Ollama', cmd: `OLLAMA_ORIGINS=${origin} ollama serve`,
+    note: 'Quit the Ollama menu-bar app first — it holds port 11434.' },
+  { app: 'LM Studio', cmd: 'lms server start --cors',
+    note: 'Or: Developer tab → enable CORS, then start the server.' },
+  { app: 'llama.cpp', cmd: 'llama-server -m model.gguf --port 8080 --cors',
+    note: 'Point --port at whatever URL you set above.' },
+];
+
+/**
  * Diagnose a local model server. MUST be called from a click: the browser only
  * shows the Local Network Access prompt during a user gesture.
  * @returns {{status:'ok'|'permission'|'cors'|'offline'|'http', models?:string[], detail:string}}
@@ -64,12 +78,9 @@ export async function probe(baseUrl){
       'The browser blocked the request to your machine. Click Connect again and choose ' +
       'Allow on the "local network" prompt.' };
 
-  return { status: 'cors', detail:
-    'Could not reach ' + baseUrl + '. Either the server is not running, or it is not ' +
-    'allowing this site. Start it with the origin allowed:\n' +
-    '  Ollama:      OLLAMA_ORIGINS=' + location.origin + ' ollama serve\n' +
-    '  LM Studio:   enable CORS in the server settings\n' +
-    '  llama.cpp:   llama-server -m model.gguf --port 8080 --cors' };
+  return { status: 'cors', cmds: corsCommands(),
+    detail: 'Could not reach ' + baseUrl + '. It is either not running, or not allowing ' +
+            'this site. Run the one for your app, then press Connect again.' };
 }
 
 /** Chat completions against the user's own machine, streamed. */

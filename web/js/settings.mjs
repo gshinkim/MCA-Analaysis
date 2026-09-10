@@ -1,5 +1,6 @@
-import { $, $$, store } from './util.mjs';
+import { $, $$, store, flash } from './util.mjs';
 import { S } from './state.mjs';
+import * as api from './api.mjs';
 import { pickFile } from './filepicker.mjs';
 import { probe as probeLocal, permissionState } from './localai.mjs';
 
@@ -93,7 +94,8 @@ export function fillModels(){
    OLLAMA_ORIGINS, and no browser local-network prompt: press nothing, and if
    Ollama or LM Studio is up its models are simply in the picker. */
 export async function refreshLocal(){
-  try { S.local = await api.scanLocal(); } catch { S.local = null; }
+  try { S.local = await api.scanLocal(); }
+  catch(e){ S.local = null; console.warn('local model scan failed:', e); }
   fillModels(); renderFound();
   return S.local;
 }
@@ -143,6 +145,20 @@ async function probe(baseUrl, apiKey, into){
   }
   into.className='probe bad';
   into.textContent = (r.status==='permission' ? '⚠ ' : '✕ ')+r.detail;
+  // one labelled, copyable line per app — running them together as prose helped nobody
+  (r.cmds ?? []).forEach(c=>{
+    const row=document.createElement('div'); row.className='cmd';
+    row.innerHTML='<b></b><code></code><button class="btn sm ghost">Copy</button>'+
+                  (c.note ? '<span class="note"></span>' : '');
+    row.querySelector('b').textContent=c.app;
+    row.querySelector('code').textContent=c.cmd;
+    if(c.note) row.querySelector('.note').textContent=c.note;
+    row.querySelector('button').onclick=async e=>{
+      try{ await navigator.clipboard.writeText(c.cmd); flash(e.target,'Copied'); }
+      catch{ getSelection().selectAllChildren(row.querySelector('code')); }
+    };
+    into.append(row);
+  });
   return null;
 }
 
