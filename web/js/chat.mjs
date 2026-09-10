@@ -132,6 +132,13 @@ function send(){
           tkTime.textContent = '';
           think.classList.add('done');
         }
+        if(ev.noTools && body){
+          // a model that answers a question about the model without ever reading it
+          const w=document.createElement('div'); w.className='meta warn';
+          w.textContent='No tools were called — nothing here was checked against the '+
+                        'model or Tellurium.';
+          wrap.append(w);
+        }
         if(ev.ms) { const m=document.createElement('div'); m.className='meta';
                     m.textContent = (ev.ms/1000).toFixed(1)+'s · '+(ev.turns??0)+' turns'; wrap.append(m); }
         return;

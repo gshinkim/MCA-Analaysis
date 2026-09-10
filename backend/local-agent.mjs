@@ -341,7 +341,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
 
       const messages = [{ role: 'system', content: system }, ...history,
                         { role: 'user', content: prompt }];
-      let final = '';
+      let final = '', usedTools = false;
       for (let step = 0; step < 14; step++) {
         if (ctrl.signal.aborted) break;
         const m = await chat.complete({ messages, tools: allTools.defs, signal: ctrl.signal,
@@ -349,6 +349,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
         messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
         if (!calls.length) { final = m.content ?? ''; break; }
+        usedTools = true;
         for (const c of calls) {
           const name = c.function?.name;
           let a = {};
@@ -362,7 +363,8 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
                           content: String(out).slice(0, 40000) });
         }
       }
-      emit({ type: 'result', text: final || '(the model produced no final answer)', isError: !final });
+      emit({ type: 'result', text: final || '(the model produced no final answer)',
+             isError: !final, noTools: !usedTools });
       emit({ type: 'done', code: 0 });
     } catch (e) {
       emit({ type: 'fatal', error: String(e.message || e) });

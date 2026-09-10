@@ -212,13 +212,14 @@ export function runBrowserAgent({ cfg, prompt, getModel, setModel, useWorkflow =
           : tk.defs };
 
       const messages = [{ role:'system', content: system }, { role:'user', content: prompt }];
-      let final = '';
+      let final = '', usedTools = false;
       for (let i = 0; i < 14; i++){
         if (ctrl.signal.aborted) break;
         const m = await chat({ messages, tools: all.defs, onStream: emit });
         messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
         if (!calls.length){ final = m.content ?? ''; break; }
+        usedTools = true;
         for (const c of calls){
           const name = c.function?.name;
           let a = {}; try { a = JSON.parse(c.function?.arguments || '{}'); } catch {}
@@ -228,7 +229,7 @@ export function runBrowserAgent({ cfg, prompt, getModel, setModel, useWorkflow =
           messages.push({ role:'tool', tool_call_id: c.id, name, content: String(out).slice(0, 30000) });
         }
       }
-      emit({ type:'result', text: final || '(no final answer)', isError: !final });
+      emit({ type:'result', text: final || '(no final answer)', isError: !final, noTools: !usedTools });
       emit({ type:'done', code: 0 });
     } catch (e) {
       emit({ type:'fatal', error: String(e.message || e) });
