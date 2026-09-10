@@ -367,3 +367,10 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .cmd code{font:11.5px/1.5 var(--mono);color:var(--ink);white-space:pre-wrap;
   overflow-wrap:anywhere}
 .cmd .note{grid-column:2/4;font-size:11px;color:var(--muted);margin-top:-2px}
+
+/* A narrow pane clipped the last buttons in the header — Rerun among them — with
+   no way to get at them. Let the row scroll instead of swallowing them. */
+.pane-hd{overflow-x:auto;overflow-y:hidden;scrollbar-width:thin}
+.pane-hd::-webkit-scrollbar{height:5px}
+.pane-hd::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.pane-hd>.btn,.pane-hd>.hd-btn,.pane-hd>.sub{flex:none}

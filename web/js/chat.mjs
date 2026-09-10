@@ -59,7 +59,7 @@ function send(){
   const text = document.createElement('div'); text.className='txt'; wrap.append(text);
   const seen = new Set();
   const started = Date.now();
-  let body = '', lastPhase = '', thoughts = '';
+  let body = '', lastPhase = '', thoughts = '', failed = false;
 
   const addTool = t => {
     const label = t.name==='Workflow'    ? 'workflow: mca-tellurium'
@@ -137,14 +137,15 @@ function send(){
         return;
       }
       if(ev.type==='model_changed'){ onModelChanged(ev.src); return; }
-      if(ev.type==='fatal'){ text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
+      if(ev.type==='fatal'){
+        failed = true; text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
       if(ev.type==='done' || ev.type==='closed'){
         if(thoughts && !think.classList.contains('done')){
           const secs = Math.max(1, Math.round((Date.now()-started)/1000));
           tkLabel.textContent = 'Thought for '+secs+'s';
           think.classList.add('done');
         }
-        if(!body && ev.type==='done' && ev.code) text.innerHTML =
+        if(!body && !failed && ev.type==='done' && ev.code) text.innerHTML =
           '<span class="err">The agent exited with code '+ev.code+'. Check the server log.</span>';
         abort=null; $('#send').textContent='Send'; $('#msgs').scrollTop=1e9;
       }
