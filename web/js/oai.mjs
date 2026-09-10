@@ -137,3 +137,20 @@ export function mergeToolDeltas(calls, deltas) {
   }
   return calls;
 }
+
+/**
+ * Run a tool by name, and when the model invents one, say what actually exists.
+ *
+ * The agent definition tells the model to call Read, Write, Edit, Skill and
+ * Workflow; the local runtimes offer read_model/write_model/simulate/... instead.
+ * A model that follows the prose got back "impl[name] is not a function", which
+ * names neither the problem nor the fix, so it had no way to recover.
+ */
+export async function callTool(impl, name, args) {
+  const fn = impl?.[name];
+  if (typeof fn !== 'function')
+    return `ERROR: there is no tool called "${name}" here. Your tools are: ` +
+           Object.keys(impl ?? {}).join(', ') + '. Call one of those instead.';
+  try { return await fn(args); }
+  catch (e) { return 'ERROR: ' + (e?.message ?? e); }
+}

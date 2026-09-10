@@ -22,14 +22,14 @@ export const settle   = q => post('/api/settle', q);
 export const mca      = q => post('/api/mca', q);
 
 /** One agent turn, streamed as server-sent events. Returns an abort function. */
-export function chat({ message, sessionId, model, env, runtime, chatCfg, useWorkflow }, onEvent){
+export function chat({ message, sessionId, model, env, runtime, chatCfg, useWorkflow, history }, onEvent){
   const ctrl = new AbortController();
   (async () => {
     let res;
     try{
       res = await fetch('/api/chat', { method:'POST', signal: ctrl.signal,
         headers:{'content-type':'application/json'},
-        body: JSON.stringify({ message, sessionId, model, env, runtime, chatCfg, useWorkflow }) });
+        body: JSON.stringify({ message, sessionId, model, env, runtime, chatCfg, useWorkflow, history }) });
     }catch(e){
       if(e.name!=='AbortError') onEvent({type:'fatal', error:String(e.message||e)});
       return;

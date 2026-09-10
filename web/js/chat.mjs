@@ -15,9 +15,49 @@ export const setOnModelChanged = fn => { onModelChanged = fn; };
 
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
+/* Conversations live only in this module: no localStorage, no file, nothing sent
+   anywhere to be kept. Reload the page or close the tab and every log is gone,
+   which is the whole point — the agent remembers within a session and forgets
+   when it ends. */
+const chats = [];
+let active = null, seq = 0;
+const cur = () => chats.find(c => c.id === active);
+
+function makeChat(){
+  const thread = document.createElement('div');
+  thread.className = 'thread';
+  $('#msgs').append(thread);
+  const c = { id: ++seq, title: 'New chat', thread, history: [], sessionId: null };
+  chats.push(c);
+  show(c.id);
+  bubble('ai','I read and edit the model in the editor, run Tellurium, and route every '+
+              'analysis through the <code>mca-tellurium</code> workflow. I remember this '+
+              'conversation until the page is closed.');
+  return c;
+}
+
+function show(id){
+  active = id;
+  chats.forEach(c => { c.thread.hidden = c.id !== id; });
+  renderChatPick();
+  const c = cur();
+  $('#sugg').hidden = !c || c.history.length > 0;
+  $('#msgs').scrollTop = 1e9;
+}
+
+function renderChatPick(){
+  const sel = $('#chatPick'); if(!sel) return;
+  sel.textContent = '';
+  chats.forEach(c => {
+    const o = document.createElement('option');
+    o.value = c.id; o.textContent = c.title; sel.append(o);
+  });
+  sel.value = active;
+}
+
 function bubble(who, html){
   const d=document.createElement('div'); d.className='msg '+who; d.innerHTML=html;
-  $('#msgs').append(d); $('#msgs').scrollTop=1e9; return d;
+  (cur()?.thread ?? $('#msgs')).append(d); $('#msgs').scrollTop=1e9; return d;
 }
 
 export function toggleChat(force){
@@ -29,7 +69,7 @@ export function toggleChat(force){
 }
 
 function renderSugg(){
-  const s=$('#sugg'); s.textContent=''; s.hidden=false;
+  const s=$('#sugg'); s.textContent='';
   SUGGEST.forEach(t=>{ const b=document.createElement('button'); b.className='btn sm'; b.textContent=t;
     b.onclick=()=>{ $('#ask').value=t; send(); }; s.append(b); });
 }
@@ -37,6 +77,11 @@ function renderSugg(){
 function send(){
   const v=$('#ask').value.trim();
   if(!v || abort) return;
+  const c = cur() ?? makeChat();
+  if(!c.history.length){                       // name the conversation by its opening line
+    c.title = v.length > 34 ? v.slice(0,33)+'…' : v;
+    renderChatPick();
+  }
   bubble('me', esc(v));
   $('#ask').value=''; $('#ask').style.height='auto';
   $('#sugg').hidden=true;
@@ -59,7 +104,7 @@ function send(){
   const text = document.createElement('div'); text.className='txt'; wrap.append(text);
   const seen = new Set();
   const started = Date.now();
-  let body = '', lastPhase = '', thoughts = '', failed = false;
+  let body = '', lastPhase = '', thoughts = '', failed = false, logged = false;
 
   const addTool = t => {
     const label = t.name==='Workflow'    ? 'workflow: mca-tellurium'
@@ -79,7 +124,7 @@ function send(){
                        : 'Starting the model-scientist agent (workflow off)…');
 
   const handle = ev => {
-      if(ev.type==='session'){ S.sessionId = ev.sessionId; return; }
+      if(ev.type==='session'){ c.sessionId = ev.sessionId; S.sessionId = ev.sessionId; return; }
       if(ev.type==='init'){ status('Agent started…'); return; }
       if(ev.type==='workflow_start'){ status('Running mca-tellurium…'); return; }
       if(ev.type==='workflow_done'){ status('Workflow finished, composing the answer…'); return; }
@@ -147,6 +192,17 @@ function send(){
       if(ev.type==='fatal'){
         failed = true; text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
       if(ev.type==='done' || ev.type==='closed'){
+        // 'done' (agent) and 'closed' (stream end) both arrive on the server path
+        if(!logged){
+          logged = true;
+          const acts = [...seen].filter(x => !x.startsWith('phase:'));
+          c.history.push({ role:'user', content: v });
+          c.history.push({ role:'assistant', content: (body || '(no answer)') +
+            (acts.length ? '\n\n[tools used this turn: '+acts.join(', ')+']' : '') });
+          // ponytail: last 12 messages; the system prompt is already ~8k tokens.
+          // Summarise instead if conversations need to run longer than that.
+          if(c.history.length > 12) c.history.splice(0, c.history.length - 12);
+        }
         if(thoughts && !think.classList.contains('done')){
           const secs = Math.max(1, Math.round((Date.now()-started)/1000));
           tkLabel.textContent = 'Thought for '+secs+'s';
@@ -163,7 +219,7 @@ function send(){
     // runtime. The agent runs in the page instead — which is why a hosted setup still
     // needs the model server to allow this origin. Locally we never take that path.
     const a = runBrowserAgent({
-      cfg: rt.chatCfg, prompt: v, useWorkflow: useWorkflow(),
+      cfg: rt.chatCfg, prompt: v, history: c.history, useWorkflow: useWorkflow(),
       getModel: () => $('#model').value,
       setModel: src => { $('#model').value = src;
                          $('#model').dispatchEvent(new Event('input',{bubbles:true})); },
@@ -171,7 +227,8 @@ function send(){
     });
     abort = () => a.kill();
   } else {
-    abort = api.chat({ message: v, sessionId: S.sessionId, ...rt, useWorkflow: useWorkflow() }, handle);
+    abort = api.chat({ message: v, sessionId: c.sessionId, history: c.history,
+                       ...rt, useWorkflow: useWorkflow() }, handle);
   }
 }
 
@@ -179,11 +236,14 @@ export function initChat(){
   $('#aiBtn').onclick   = ()=>toggleChat();
   $('#chatRail').onclick= ()=>toggleChat(true);
   $('#chatClose').onclick=()=>toggleChat(false);
+  $('#newChat').onclick = ()=>{ if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
+                               makeChat(); $('#ask').focus(); };
+  $('#chatPick').onchange = e => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
+                                   show(+e.target.value); };
   $('#send').onclick = ()=>{ if(abort){ abort(); abort=null; $('#send').textContent='Send'; } else send(); };
   $('#ask').addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
   $('#ask').addEventListener('input',e=>{
     e.target.style.height='auto'; e.target.style.height=Math.min(110,e.target.scrollHeight)+'px'; });
   renderSugg();
-  bubble('ai','I read and edit the model in the editor, run Tellurium, and route every analysis '+
-              'through the <code>mca-tellurium</code> workflow.');
+  makeChat();
 }

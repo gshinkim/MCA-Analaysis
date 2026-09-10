@@ -374,3 +374,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .pane-hd::-webkit-scrollbar{height:5px}
 .pane-hd::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .pane-hd>.btn,.pane-hd>.hd-btn,.pane-hd>.sub{flex:none}
+
+/* One conversation per thread; only the active one is in the flow. */
+#msgs>.thread{display:flex;flex-direction:column;gap:12px}
+#chat .hd #chatPick{max-width:150px;font-weight:600}

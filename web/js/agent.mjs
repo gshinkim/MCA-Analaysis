@@ -1,5 +1,5 @@
 import { localChat } from './localai.mjs';
-import { forHistory, TEXT_TOOL_PROTOCOL } from './oai.mjs';
+import { forHistory, TEXT_TOOL_PROTOCOL, callTool } from './oai.mjs';
 import * as api from './api.mjs';
 
 /* The agent, running in the page. Inference happens on the user's machine; the
@@ -27,9 +27,21 @@ const RUNTIME = `
 
 You are running inside MCA Atlas, in the user's browser. Your tools are:
 load_skill, read_reference, read_model, write_model, simulate, steady_state,
-mca, list_skills. There is no Skill tool and no Workflow tool here - where your
-instructions say "call the Skill tool", call load_skill instead and route from
-that Skill's own tables.
+mca, list_skills - and nothing else.
+
+Everything below this section was written for a different runtime and names tools
+that do not exist here. Translate as you read; calling any of the left-hand names
+fails:
+
+    Read / Write / Edit on workspace/model.txt  ->  read_model / write_model
+    Read on a Skill reference file              ->  read_reference
+    Skill                                       ->  load_skill  (then route from
+                                                    that Skill's own tables)
+    Workflow                                    ->  run_mca_workflow
+    Bash, Glob, Grep                            ->  no equivalent; say so instead
+
+"workspace/model.txt" and "the live model" mean the same thing: read_model gives
+you its current text, write_model replaces it.
 
 THE LIVE MODEL is the Antimony source in the user's editor. read_model returns it;
 write_model replaces it and is how the user sees your change.
@@ -122,8 +134,7 @@ async function loop({ chat, system, prompt, tk, schema, emit, signal, maxSteps =
       const name = c.function?.name;
       let args = {}; try { args = JSON.parse(c.function?.arguments || '{}'); } catch {}
       emit({ type:'tools', tools:[{ name, input: args }] });
-      let out; try { out = await tk.impl[name](args); }
-      catch(e){ out = 'ERROR: ' + e.message; }
+      const out = await callTool(tk.impl, name, args);
       messages.push({ role:'tool', tool_call_id: c.id, name, content: String(out).slice(0, 30000) });
     }
   }
@@ -163,7 +174,7 @@ function fill(o, schema){
 }
 
 /** One turn. Returns { kill }. Events mirror the server runtime's shapes. */
-export function runBrowserAgent({ cfg, prompt, getModel, setModel, useWorkflow = true, onEvent }){
+export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel, useWorkflow = true, onEvent }){
   const ctrl = new AbortController();
   const emit = onEvent;
   const chat = ({ messages, tools, schema, onStream }) =>
@@ -211,7 +222,8 @@ export function runBrowserAgent({ cfg, prompt, getModel, setModel, useWorkflow =
             question:{type:'string'}, needsNumbers:{type:'boolean'} }, required:['question'] } } }]
           : tk.defs };
 
-      const messages = [{ role:'system', content: system }, { role:'user', content: prompt }];
+      const messages = [{ role:'system', content: system }, ...history,
+                        { role:'user', content: prompt }];
       let final = '', usedTools = false;
       for (let i = 0; i < 14; i++){
         if (ctrl.signal.aborted) break;
@@ -224,8 +236,7 @@ export function runBrowserAgent({ cfg, prompt, getModel, setModel, useWorkflow =
           const name = c.function?.name;
           let a = {}; try { a = JSON.parse(c.function?.arguments || '{}'); } catch {}
           emit({ type:'tools', tools:[{ name: name === 'run_mca_workflow' ? 'Workflow' : name, input: a }] });
-          let out; try { out = await all.impl[name](a); }
-          catch(e){ out = 'ERROR: ' + e.message; }
+          const out = await callTool(all.impl, name, a);
           messages.push({ role:'tool', tool_call_id: c.id, name, content: String(out).slice(0, 30000) });
         }
       }

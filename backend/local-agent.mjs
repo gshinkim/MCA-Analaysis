@@ -1,7 +1,7 @@
 import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
-import { thinkStream, textToolCalls, mergeToolDeltas, forHistory, TEXT_TOOL_PROTOCOL }
+import { thinkStream, textToolCalls, mergeToolDeltas, forHistory, TEXT_TOOL_PROTOCOL, callTool }
   from '../web/js/oai.mjs';
 
 /* A second agent runtime for models that are not Claude Code: anything speaking
@@ -189,9 +189,7 @@ async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
       let args = {};
       try { args = JSON.parse(c.function?.arguments || '{}'); } catch {}
       emit({ type: 'tools', tools: [{ name, input: args }] });
-      let out;
-      try { out = await tools.impl[name](args); }
-      catch (e) { out = 'ERROR: ' + e.message; }
+      const out = await callTool(tools.impl, name, args);
       messages.push({ role: 'tool', tool_call_id: c.id, name,
                       content: String(out).slice(0, 40000) });
     }
@@ -263,9 +261,16 @@ const RUNTIME_NOTE = `
 ## Runtime
 
 You are running inside MCA Atlas on a local model runtime. You have exactly these
-tools: load_skill, read_file, write_file, list_dir, run_python. There is no Skill
-tool and no Workflow tool here - where your instructions say "call the Skill tool",
-call load_skill instead, and route from that Skill's own tables.
+tools: load_skill, read_file, write_file, list_dir, run_python - and nothing else.
+
+Everything below this section was written for a different runtime and names tools
+that do not exist here. Translate as you read; calling any of the left-hand names
+fails:
+
+    Read   ->  read_file          Write / Edit  ->  write_file
+    Glob   ->  list_dir           Bash          ->  run_python
+    Skill  ->  load_skill  (then route from that Skill's own tables)
+    Workflow  ->  run_mca_workflow
 
 THE LIVE MODEL is workspace/model.txt in Antimony. It is the text in the user's
 editor. Change what the user sees by writing that file.
@@ -356,9 +361,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
           try { a = JSON.parse(c.function?.arguments || '{}'); } catch {}
           if (name !== 'run_mca_workflow') emit({ type: 'tools', tools: [{ name, input: a }] });
           else emit({ type: 'tools', tools: [{ name: 'Workflow', input: { workflow: 'mca-tellurium' } }] });
-          let out;
-          try { out = await allTools.impl[name](a); }
-          catch (e) { out = 'ERROR: ' + e.message; }
+          const out = await callTool(allTools.impl, name, a);
           messages.push({ role: 'tool', tool_call_id: c.id, name,
                           content: String(out).slice(0, 40000) });
         }

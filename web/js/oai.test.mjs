@@ -1,6 +1,6 @@
 /* node web/js/oai.test.mjs */
 import assert from 'node:assert/strict';
-import { thinkStream, textToolCalls, forHistory, mergeToolDeltas } from './oai.mjs';
+import { thinkStream, textToolCalls, forHistory, mergeToolDeltas, callTool } from './oai.mjs';
 
 const run = chunks => {
   const ev = [];
@@ -53,5 +53,14 @@ assert.deepEqual(forHistory({ role: 'assistant', content: 'x', reasoning: 'y', f
 // an object-valued `arguments` must not stringify as [object Object]
 assert.equal(mergeToolDeltas([], [{ index: 0, id: 'a', function: { name: 'run_python', arguments: { code: '1' } } }])[0]
   .function.arguments, '{"code":"1"}');
+
+// a tool name the model invented must come back naming what does exist, not a
+// TypeError about impl[name] — the model has to be able to recover from it
+const impl = { read_model: async () => 'the model', boom: async () => { throw new Error('kaboom'); } };
+const miss = await callTool(impl, 'Read', {});
+assert.match(miss, /no tool called "Read"/);
+assert.match(miss, /read_model/);                  // tells it what to call instead
+assert.equal(await callTool(impl, 'read_model', {}), 'the model');
+assert.equal(await callTool(impl, 'boom', {}), 'ERROR: kaboom');
 
 console.log('ok');
