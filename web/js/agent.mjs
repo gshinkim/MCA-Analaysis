@@ -1,4 +1,5 @@
 import { localChat } from './localai.mjs';
+import { forHistory, TEXT_TOOL_PROTOCOL } from './oai.mjs';
 import * as api from './api.mjs';
 
 /* The agent, running in the page. Inference happens on the user's machine; the
@@ -36,6 +37,8 @@ write_model replaces it and is how the user sees your change.
 You cannot execute arbitrary code. Every number comes from simulate, steady_state
 or mca, which run real Tellurium (libroadrunner) on the server. If an analysis
 needs something those three cannot give you, say so rather than estimating it.
+
+${TEXT_TOOL_PROTOCOL}
 `.trim();
 
 function tools(getModel, setModel, emit){
@@ -109,7 +112,7 @@ async function loop({ chat, system, prompt, tk, schema, emit, signal, maxSteps =
   for (let i = 0; i < maxSteps; i++){
     if (signal?.aborted) throw new Error('aborted');
     const m = await chat({ messages, tools: tk.defs, onStream: stream });
-    messages.push(m);
+    messages.push(forHistory(m));
     const calls = m.tool_calls ?? [];
     if (!calls.length){
       if (!schema) return m.content ?? '';
@@ -137,7 +140,7 @@ async function constrain({ chat, messages, schema, emit, signal }){
     catch { m = await chat({ messages:[...messages, ask], onStream: quiet }); }
     const p = parse(m.content);
     if (p && typeof p === 'object') return fill(p, schema);
-    messages.push(m, { role:'user', content:'That was not valid JSON. Output the object only.' });
+    messages.push(forHistory(m), { role:'user', content:'That was not valid JSON. Output the object only.' });
   }
   return fill({}, schema);
 }
@@ -213,7 +216,7 @@ export function runBrowserAgent({ cfg, prompt, getModel, setModel, useWorkflow =
       for (let i = 0; i < 14; i++){
         if (ctrl.signal.aborted) break;
         const m = await chat({ messages, tools: all.defs, onStream: emit });
-        messages.push(m);
+        messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
         if (!calls.length){ final = m.content ?? ''; break; }
         for (const c of calls){

@@ -104,6 +104,12 @@ function send(){
         body=''; text.textContent='';    // preamble before a tool call is not the answer
         $('#msgs').scrollTop=1e9; return;
       }
+      if(ev.type==='unthink'){
+        // the model's template pre-opened <think>: what streamed as the answer
+        // was really the scratchpad, so move it into the thinking panel
+        thoughts += body; body=''; text.textContent='';
+        think.hidden=false; tkBody.textContent=thoughts; return;
+      }
       if(ev.type==='thinking'){
         // a whole block repeats what the deltas already streamed
         if(ev.whole && thoughts.includes(ev.text.trim().slice(0,60))) return;

@@ -1,4 +1,4 @@
-import { $ } from './util.mjs';
+import { thinkStream, textToolCalls, mergeToolDeltas } from './oai.mjs';
 
 /* Reaching a model server on the user's own machine from a hosted https page.
    Chrome 141+ gates this behind the Local Network Access permission, which only
@@ -76,7 +76,9 @@ export async function probe(baseUrl){
 export async function localChat({ baseUrl, apiKey, model, messages, tools, schema, signal, onStream }){
   const base = baseUrl.replace(/\/+$/,'');
   const url = (/\/v\d+$/.test(base) ? base : base + '/v1') + '/chat/completions';
-  const body = { model, messages, stream: true, max_tokens: 4096, temperature: 0.2 };
+  // A 27B reasoning model routinely spends more than 4k tokens thinking; capping
+  // there truncated the answer mid-tool-call, which reads as "it cannot call tools".
+  const body = { model, messages, stream: true, max_tokens: 16384, temperature: 0.2 };
   if (tools?.length) body.tools = tools;
   if (schema) body.response_format = { type:'json_schema',
                                        json_schema:{ name:'result', strict:true, schema } };
@@ -91,7 +93,8 @@ export async function localChat({ baseUrl, apiKey, model, messages, tools, schem
   if (!res.ok) throw new Error(model + ': HTTP ' + res.status + ' ' + (await res.text().catch(()=>'')).slice(0,200));
   if (!res.body) throw new Error('no response body from ' + url);
 
-  let content = '', reasoning = '';
+  let reasoning = '', finish = '';
+  const think = thinkStream(onStream);
   const calls = [];
   const rd = res.body.getReader(), dec = new TextDecoder();
   let buf = '';
@@ -107,27 +110,23 @@ export async function localChat({ baseUrl, apiKey, model, messages, tools, schem
       if (p === '[DONE]') continue;
       let d; try { d = JSON.parse(p); } catch { continue; }
       if (d.error) throw new Error(String(d.error.message ?? d.error));
-      const delta = d.choices?.[0]?.delta ?? {};
-      const think = delta.reasoning ?? delta.reasoning_content;
-      if (think) { reasoning += think; onStream?.({ type:'thinking', text: think }); }
-      if (delta.content) { content += delta.content; onStream?.({ type:'delta', text: delta.content }); }
-      for (const tc of delta.tool_calls ?? []){
-        const k = tc.index ?? calls.length;
-        calls[k] ??= { id: tc.id || 'call_'+k, type:'function', function:{ name:'', arguments:'' } };
-        if (tc.id) calls[k].id = tc.id;
-        if (tc.function?.name) calls[k].function.name += tc.function.name;
-        if (tc.function?.arguments) calls[k].function.arguments += tc.function.arguments;
-      }
+      const ch = d.choices?.[0];
+      if (ch?.finish_reason) finish = ch.finish_reason;
+      const delta = ch?.delta ?? {};
+      const th = delta.reasoning ?? delta.reasoning_content;
+      if (th) { reasoning += th; onStream?.({ type:'thinking', text: th }); }
+      if (delta.content) think.push(delta.content);   // splits inline <think> as it streams
+      mergeToolDeltas(calls, delta.tool_calls);
     }
   }
-  // some servers leave the scratchpad inline instead of in `reasoning`
-  if (content.includes('<think>')){
-    const parts = [];
-    content = content.replace(/<think>([\s\S]*?)<\/think>/g, (_, x) => { parts.push(x); return ''; }).trim();
-    if (parts.length) reasoning = [reasoning, ...parts].filter(Boolean).join('\n');
-  }
-  const msg = { role:'assistant', content, reasoning: reasoning || undefined };
-  const tc = calls.filter(Boolean);
+  const split = think.end();
+  const msg = { role:'assistant', content: split.content,
+                reasoning: [reasoning, split.reasoning].filter(Boolean).join('\n') || undefined };
+  let tc = calls.filter(Boolean);
+  // a model whose runtime has no tool API writes the call as prose; take it anyway
+  if (!tc.length) tc = textToolCalls(split.content, (tools ?? []).map(t => t.function?.name));
   if (tc.length) msg.tool_calls = tc;
+  else if (finish === 'length') onStream?.({ type:'log',
+    text: model + ' hit its token limit before finishing — the answer is cut off.' });
   return msg;
 }

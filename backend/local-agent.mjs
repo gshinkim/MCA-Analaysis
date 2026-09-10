@@ -1,6 +1,8 @@
 import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
+import { thinkStream, textToolCalls, mergeToolDeltas, forHistory, TEXT_TOOL_PROTOCOL }
+  from '../web/js/oai.mjs';
 
 /* A second agent runtime for models that are not Claude Code: anything speaking
    OpenAI-compatible /v1/chat/completions (Ollama, LM Studio, llama-server, a GGUF
@@ -12,20 +14,6 @@ import { execFile } from 'node:child_process';
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const stripFrontmatter = md => md.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
-
-/* Reasoning models expose their scratchpad differently: Ollama and some gateways
-   return a `reasoning` field, others leave <think> blocks inline in the content. */
-export function splitReasoning(m) {
-  let reasoning = m.reasoning ?? m.reasoning_content ?? '';
-  let content = m.content ?? '';
-  if (typeof content === 'string' && content.includes('<think>')) {
-    const parts = [];
-    content = content.replace(/<think>([\s\S]*?)<\/think>/g, (_, x) => { parts.push(x); return ''; });
-    if (parts.length) reasoning = [reasoning, ...parts].filter(Boolean).join('\n');
-    content = content.trim();
-  }
-  return { ...m, content, reasoning: reasoning || undefined };
-}
 
 /* ------------------------------- provider ------------------------------- */
 export class Chat {
@@ -40,7 +28,9 @@ export class Chat {
      "network error"; streaming returns headers immediately and then keeps the
      body flowing, so the connection never idles out. It also lets thinking and
      tokens reach the UI as they are produced. */
-  async complete({ messages, tools, schema, signal, onStream, maxTokens = 4096 }) {
+  // A 27B reasoning model routinely spends more than 4k tokens thinking; capping
+  // there truncated the answer mid-tool-call, which reads as "it cannot call tools".
+  async complete({ messages, tools, schema, signal, onStream, maxTokens = 16384 }) {
     const body = { model: this.model, messages, max_tokens: maxTokens, temperature: 0.2, stream: true };
     if (tools?.length) body.tools = tools;
     if (schema) body.response_format = {
@@ -65,7 +55,8 @@ export class Chat {
     }
     if (!res.body) throw new Error('no response body from ' + this.url);
 
-    let content = '', reasoning = '', finish = '';
+    let reasoning = '', finish = '';
+    const think = thinkStream(onStream);
     const calls = [];
     const dec = new TextDecoder();
     let buf = '';
@@ -84,22 +75,22 @@ export class Chat {
         if (!ch) continue;
         if (ch.finish_reason) finish = ch.finish_reason;
         const delta = ch.delta ?? ch.message ?? {};
-        const think = delta.reasoning ?? delta.reasoning_content;
-        if (think) { reasoning += think; onStream?.({ type: 'thinking', text: think }); }
-        if (delta.content) { content += delta.content; onStream?.({ type: 'delta', text: delta.content }); }
-        for (const tc of delta.tool_calls ?? []) {
-          const k = tc.index ?? calls.length;
-          calls[k] ??= { id: tc.id || 'call_' + k, type: 'function', function: { name: '', arguments: '' } };
-          if (tc.id) calls[k].id = tc.id;
-          if (tc.function?.name) calls[k].function.name += tc.function.name;
-          if (tc.function?.arguments) calls[k].function.arguments += tc.function.arguments;
-        }
+        const th = delta.reasoning ?? delta.reasoning_content;
+        if (th) { reasoning += th; onStream?.({ type: 'thinking', text: th }); }
+        if (delta.content) think.push(delta.content);  // splits inline <think> as it streams
+        mergeToolDeltas(calls, delta.tool_calls);
       }
     }
-    const msg = { role: 'assistant', content, reasoning: reasoning || undefined, finish_reason: finish };
-    const tc = calls.filter(Boolean);
+    const split = think.end();
+    const msg = { role: 'assistant', content: split.content,
+                  reasoning: [reasoning, split.reasoning].filter(Boolean).join('\n') || undefined };
+    let tc = calls.filter(Boolean);
+    // a model whose runtime has no tool API writes the call as prose; take it anyway
+    if (!tc.length) tc = textToolCalls(split.content, (tools ?? []).map(t => t.function?.name));
     if (tc.length) msg.tool_calls = tc;
-    return splitReasoning(msg);
+    else if (finish === 'length') onStream?.({ type: 'log',
+      text: this.model + ' hit its token limit before finishing - the answer is cut off.' });
+    return msg;
   }
 }
 
@@ -187,7 +178,7 @@ async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
     // models cannot emit a tool call and a constrained JSON object in one turn.
     const m = await chat.complete({ messages, tools: tools.defs, signal,
       onStream: ev => { if (ev.type === 'thinking') emit(ev); } });
-    messages.push(m);
+    messages.push(forHistory(m));
     const calls = m.tool_calls ?? [];
     if (!calls.length) {
       if (!schema) return m.content ?? '';
@@ -224,7 +215,8 @@ async function constrain({ chat, messages, schema, emit, signal }) {
     }
     const parsed = parseLoose(m.content);
     if (parsed && typeof parsed === 'object') return fill(parsed, schema);
-    messages.push(m, { role: 'user', content: 'That was not valid JSON. Output the JSON object only.' });
+    messages.push(forHistory(m),
+                  { role: 'user', content: 'That was not valid JSON. Output the JSON object only.' });
   }
   return fill({}, schema);            // never crash the workflow on a weak model
 }
@@ -280,6 +272,8 @@ editor. Change what the user sees by writing that file.
 
 run_python already has tellurium, roadrunner, numpy and scipy importable. Only
 stdout comes back, so print everything you need. Scripts are kept in workspace/runs/.
+
+${TEXT_TOOL_PROTOCOL}
 `.trim();
 
 /* ------------------------------ the outer turn ------------------------------ */
@@ -352,7 +346,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
         if (ctrl.signal.aborted) break;
         const m = await chat.complete({ messages, tools: allTools.defs, signal: ctrl.signal,
           onStream: emit });                       // outer turn: thinking and tokens both
-        messages.push(m);
+        messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
         if (!calls.length) { final = m.content ?? ''; break; }
         for (const c of calls) {
