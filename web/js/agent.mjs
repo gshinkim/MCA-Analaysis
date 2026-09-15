@@ -1,5 +1,7 @@
 import { localChat } from './localai.mjs';
-import { forHistory, TEXT_TOOL_PROTOCOL, callTool } from './oai.mjs';
+import { forHistory, toolRunner, toolResult, resultCap, CONTEXT_DEFAULT,
+         REPEAT_LIMIT, stripToolSyntax, missingArgs } from './oai.mjs';
+import { localSystem } from './prompt.mjs';
 import * as api from './api.mjs';
 
 /* The agent, running in the page. Inference happens on the user's machine; the
@@ -22,36 +24,32 @@ const text = async url => {
   return cache.get(url);
 };
 
-const RUNTIME = `
-## Runtime
+const TOOL_NAMES = ['list_skills', 'load_skill', 'read_reference', 'read_model',
+                    'write_model', 'simulate', 'steady_state', 'mca'];
 
-You are running inside MCA Atlas, in the user's browser. Your tools are:
-load_skill, read_reference, read_model, write_model, simulate, steady_state,
-mca, list_skills - and nothing else.
+const HOW_TO_RUN = `THE LIVE MODEL is the Antimony in the user's editor: \`read_model\` returns it,
+\`write_model\` replaces it, and that is how the user sees your change.
 
-Everything below this section was written for a different runtime and names tools
-that do not exist here. Translate as you read; calling any of the left-hand names
-fails:
+You cannot execute code here — there is no shell and no Python. Every number comes
+from \`simulate\`, \`steady_state\` or \`mca\`, which run real Tellurium (libroadrunner)
+on the server. If an analysis needs something those three cannot give, say so plainly
+rather than estimating it.`;
 
-    Read / Write / Edit on workspace/model.txt  ->  read_model / write_model
-    Read on a Skill reference file              ->  read_reference
-    Skill                                       ->  load_skill  (then route from
-                                                    that Skill's own tables)
-    Workflow                                    ->  run_mca_workflow
-    Bash, Glob, Grep                            ->  no equivalent; say so instead
+/* The workflow otherwise tells every stage to write a script and run it with Bash,
+   which this runtime has no way to do. */
+const EXEC_NOTE =
+  'Compute with the `simulate`, `steady_state` and `mca` tools — they run real ' +
+  'Tellurium on the server. There is no shell here, so there is no script to write ' +
+  'or save: report the numbers those tools return. If the plan needs something they ' +
+  'cannot do, say so in "error" instead of approximating it.';
 
-"workspace/model.txt" and "the live model" mean the same thing: read_model gives
-you its current text, write_model replaces it.
+// Tools that change the project; a repeat of any call is replayed from memory
+// (see toolRunner), so anything that writes has to invalidate that memory.
+const WRITES = ['write_model', 'run_mca_workflow'];
 
-THE LIVE MODEL is the Antimony source in the user's editor. read_model returns it;
-write_model replaces it and is how the user sees your change.
-
-You cannot execute arbitrary code. Every number comes from simulate, steady_state
-or mca, which run real Tellurium (libroadrunner) on the server. If an analysis
-needs something those three cannot give you, say so rather than estimating it.
-
-${TEXT_TOOL_PROTOCOL}
-`.trim();
+/* Tools that produce a number. Reading the model is not computing with it. */
+const COMPUTES = new Set(['simulate', 'steady_state', 'mca', 'run_mca_workflow']);
+const hasNumber = t => /\d/.test(String(t ?? ''));
 
 function tools(getModel, setModel, emit){
   const impl = {
@@ -119,11 +117,20 @@ function tools(getModel, setModel, emit){
   return { impl, defs };
 }
 
-async function loop({ chat, system, prompt, tk, schema, emit, signal, maxSteps = 14, stream }){
+async function loop({ chat, system, prompt, tk, schema, emit, signal, maxSteps = 14, stream, cap = resultCap() }){
   const messages = [{ role:'system', content: system }, { role:'user', content: prompt }];
+  const run = toolRunner(tk.impl, WRITES);
+  const lacks = missingArgs(tk.defs);
   for (let i = 0; i < maxSteps; i++){
     if (signal?.aborted) throw new Error('aborted');
-    const m = await chat({ messages, tools: tk.defs, onStream: stream });
+    // On the last step ask with no tools, so the stage ends in an answer rather than
+    // in "(kept calling tools without answering)".
+    const stuck = run.repeats >= REPEAT_LIMIT;
+    const wrapUp = i === maxSteps - 1 || stuck;
+    if (wrapUp) emit({ type:'log', text: stuck
+      ? 'same call repeated; answering with what it has'
+      : 'stage is out of steps; answering with what it has' });
+    const m = await chat({ messages, tools: wrapUp ? undefined : tk.defs, onStream: stream });
     messages.push(forHistory(m));
     const calls = m.tool_calls ?? [];
     if (!calls.length){
@@ -134,8 +141,8 @@ async function loop({ chat, system, prompt, tk, schema, emit, signal, maxSteps =
       const name = c.function?.name;
       let args = {}; try { args = JSON.parse(c.function?.arguments || '{}'); } catch {}
       emit({ type:'tools', tools:[{ name, input: args }] });
-      const out = await callTool(tk.impl, name, args);
-      messages.push({ role:'tool', tool_call_id: c.id, name, content: String(out).slice(0, 30000) });
+      const out = lacks(name, args) ?? await run(name, args);
+      messages.push(toolResult(c, name, String(out).slice(0, cap)));
     }
   }
   return schema ? constrain({ chat, messages, schema, emit, signal }) : '(kept calling tools without answering)';
@@ -183,36 +190,36 @@ export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel,
   (async () => {
     try {
       const tk = tools(getModel, setModel, emit);
-      const base = strip(await text('/agents/model-scientist.md')) + '\n\n' + RUNTIME +
-        '\n\n## The live model, as of this message\n\n' +
-        'You can see it; never ask whether a model exists.\n\n```\n' + (await getModel()).trim() + '\n```';
+      const cap = resultCap(cfg?.contextTokens);
+      const base = localSystem({ tools: TOOL_NAMES, liveModel: await getModel(),
+                                 howToRun: HOW_TO_RUN });
 
       const runWorkflow = async ({ question, needsNumbers = true }) => {
+        question = String(question ?? '').trim() || prompt;   // it is always this turn's question
         emit({ type:'workflow_start' });
         const src = await text('/workflows/mca-tellurium.js');
         const body = src.replace(/^\s*export\s+const\s+meta\s*=/m, 'const meta =');
         const agent = async (p, opts = {}) => {
           emit({ type:'phase', phase: opts.phase, label: opts.label });
           return loop({ chat, system: base, prompt: p, tk, schema: opts.schema, emit,
-                        signal: ctrl.signal,
+                        signal: ctrl.signal, cap,
                         stream: ev => { if (ev.type === 'thinking') emit(ev); } });
         };
         const out = await new AsyncFunction('agent','phase','log','args', body)(
           agent,
           t => emit({ type:'phase', phase: t }),
           t => emit({ type:'log', text: String(t) }),
-          { question, model: await getModel(), needsNumbers, workdir: '(browser)' });
+          { question, model: await getModel(), needsNumbers,
+            workdir: '(not used — there is no filesystem here)', exec: EXEC_NOTE });
         emit({ type:'workflow_done' });
-        return JSON.stringify(out).slice(0, 30000);
+        return JSON.stringify(out).slice(0, cap);
       };
 
       const system = base + (useWorkflow
-        ? '\n\nYou also have run_mca_workflow. Every analysis that needs numbers MUST go ' +
-          'through it. Answer directly only for trivial questions.'
-        : '\n\n## Workflow disabled\n\nThe mca-tellurium workflow is off because the user ' +
-          'turned it off - it is slow. Do not ask for it back and do not refuse the work. ' +
-          'Analyse directly, keeping every other rule: read the model first, load_skill ' +
-          'before any domain claim, every number from simulate/steady_state/mca.');
+        ? '\n\n## The workflow\n\nYou also have `run_mca_workflow`. Every analysis that needs ' +
+          'numbers MUST go through it. Answer directly only for questions needing no computation.'
+        : '\n\n## The workflow is off\n\nThe user turned it off because it is slow. Do not ask ' +
+          'for it back and do not refuse the work — analyse directly, keeping every rule above.');
 
       const all = { impl: { ...tk.impl, run_mca_workflow: runWorkflow },
         defs: useWorkflow ? [...tk.defs, { type:'function', function:{
@@ -224,23 +231,31 @@ export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel,
 
       const messages = [{ role:'system', content: system }, ...history,
                         { role:'user', content: prompt }];
-      let final = '', usedTools = false;
-      for (let i = 0; i < 14; i++){
+      const run = toolRunner(all.impl, WRITES);
+      const lacks = missingArgs(all.defs);
+      let final = '', usedTools = false, computed = false;
+      const STEPS = 14;
+      for (let i = 0; i < STEPS; i++){
         if (ctrl.signal.aborted) break;
-        const m = await chat({ messages, tools: all.defs, onStream: emit });
+        const stuck = run.repeats >= REPEAT_LIMIT;
+        if (stuck) emit({ type:'log', text:'same call repeated; asking for the answer' });
+        const wrapUp = i === STEPS - 1 || stuck;
+        const m = await chat({ messages, tools: wrapUp ? undefined : all.defs, onStream: emit });
         messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
-        if (!calls.length){ final = m.content ?? ''; break; }
+        if (!calls.length){ final = stripToolSyntax(m.content); break; }
         usedTools = true;
         for (const c of calls){
           const name = c.function?.name;
           let a = {}; try { a = JSON.parse(c.function?.arguments || '{}'); } catch {}
           emit({ type:'tools', tools:[{ name: name === 'run_mca_workflow' ? 'Workflow' : name, input: a }] });
-          const out = await callTool(all.impl, name, a);
-          messages.push({ role:'tool', tool_call_id: c.id, name, content: String(out).slice(0, 30000) });
+          if (COMPUTES.has(name)) computed = true;
+          const out = lacks(name, a) ?? await run(name, a);
+          messages.push(toolResult(c, name, String(out).slice(0, cap)));
         }
       }
-      emit({ type:'result', text: final || '(no final answer)', isError: !final, noTools: !usedTools });
+      emit({ type:'result', text: final || '(no final answer)', isError: !final,
+             noTools: !usedTools, unverified: !computed && hasNumber(final) });
       emit({ type:'done', code: 0 });
     } catch (e) {
       emit({ type:'fatal', error: String(e.message || e) });

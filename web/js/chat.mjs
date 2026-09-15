@@ -102,7 +102,7 @@ function send(){
   const tkTime = think.querySelector('.tk-time');
 
   const text = document.createElement('div'); text.className='txt'; wrap.append(text);
-  const seen = new Set();
+  const seen = new Set(), chips = new Map();
   const started = Date.now();
   let body = '', lastPhase = '', thoughts = '', failed = false, logged = false;
 
@@ -115,9 +115,13 @@ function send(){
                 : t.name==='write_file'  ? 'write'
                 : t.name==='Bash'        ? 'bash'
                 : t.name.toLowerCase();
-    if(seen.has(label)) return;
-    seen.add(label);
+    // A repeated call used to render as the same single chip, so a model looping
+    // ten times on one tool looked identical to one that worked first time.
+    const prev = chips.get(label);
+    if(prev){ prev.n++; prev.el.textContent = label+' ×'+prev.n; return; }
     const c=document.createElement('span'); c.className='tool'; c.textContent=label; phase.append(c);
+    chips.set(label, { el:c, n:1 });
+    seen.add(label);
   };
   const status = t => { text.innerHTML = '<span class="thinking">'+t+'</span>'; };
   status(useWorkflow() ? 'Starting the model-scientist agent…'
@@ -133,6 +137,12 @@ function send(){
           seen.add('phase:'+ev.phase);
           const c=document.createElement('span'); c.className='tool phase';
           c.textContent=ev.phase; phase.append(c);
+        }
+        // Each stage reasons from a fresh context, so without a heading the panel
+        // reads as one model repeating itself instead of seven stages making progress.
+        if(ev.phase && ev.phase !== lastPhase && thoughts){
+          thoughts += '\n\n— '+ev.phase+' —\n';
+          tkBody.textContent = thoughts;
         }
         lastPhase = ev.phase || lastPhase;
         status(ev.phase ? 'Phase: '+ev.phase : 'Working…');
@@ -176,6 +186,12 @@ function send(){
           tkLabel.textContent = 'Thought for '+(secs>=60 ? Math.floor(secs/60)+'m '+(secs%60)+'s' : secs+'s');
           tkTime.textContent = '';
           think.classList.add('done');
+        }
+        if(ev.unverified && body){
+          const w=document.createElement('div'); w.className='meta warn';
+          w.textContent='No computation was run this turn — any number above came from '+
+                        'the model, not from Tellurium.';
+          wrap.append(w);
         }
         if(ev.noTools && body){
           // a model that answers a question about the model without ever reading it

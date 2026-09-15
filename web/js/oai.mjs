@@ -66,6 +66,24 @@ export function thinkStream(onStream) {
    text protocols), or a bare object. */
 const BLOB = /<tool_call>([\s\S]*?)<\/tool_call>|```(?:json|tool_call|tool_code)?\s*([\s\S]*?)```/g;
 
+/* Qwen and Hermes templates often emit a call as nested XML rather than JSON:
+     <function=run_python><parameter=code>print(1)</parameter></function>
+   That parsed as nothing, so the loop read a tool call as the final answer. */
+const XML_FN = /<function=([\w.-]+)>([\s\S]*?)<\/function>/g;
+const XML_ARG = /<parameter=([\w.-]+)>([\s\S]*?)<\/parameter>/g;
+
+function xmlToolCalls(content, known) {
+  const out = [];
+  for (const m of String(content).matchAll(XML_FN)) {
+    if (!known.has(m[1])) continue;
+    const args = {};
+    for (const a of m[2].matchAll(XML_ARG)) args[a[1]] = a[2].trim();
+    out.push({ id: 'text_' + out.length, type: 'function',
+               function: { name: m[1], arguments: JSON.stringify(args) } });
+  }
+  return out;
+}
+
 /**
  * Recover tool calls a model wrote as text.
  *
@@ -89,6 +107,8 @@ export function textToolCalls(content, names) {
                  function: { name, arguments: typeof a === 'string' ? a : JSON.stringify(a) } });
     }
   };
+  const xml = xmlToolCalls(content, known);
+  if (xml.length) return xml;
   const blobs = [];
   for (const m of String(content).matchAll(BLOB)) blobs.push(m[1] ?? m[2]);
   blobs.push(content);                                     // an unfenced bare object
@@ -121,21 +141,76 @@ a call you did not make, and never invent its output.`.trim();
 export const forHistory = m => ({
   role: 'assistant',
   content: m.content ?? '',
-  ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}),
+  ...(m.tool_calls?.length && !isTextCall(m.tool_calls[0])
+      ? { tool_calls: m.tool_calls.map(c => ({ ...c,
+            function: { ...c.function, arguments: sendableArgs(c.function?.arguments) } })) }
+      : {}),
 });
+
+/**
+ * Tool-call arguments that a server will accept back.
+ *
+ * A small model that names a tool and stops emits `arguments: ""`. Sent back in
+ * the transcript that is not parseable JSON: LM Studio answers HTTP 500 and the
+ * whole turn dies, which is what "it just gets cut off" looks like. Measured:
+ * "" -> 500, "{}" -> 200. Truncated JSON from a dropped stream chunk is the same
+ * hazard, so anything that does not parse becomes an empty object.
+ */
+export function sendableArgs(a) {
+  if (a == null) return '{}';
+  if (typeof a !== 'string') { try { return JSON.stringify(a); } catch { return '{}'; } }
+  const t = a.trim();
+  if (!t) return '{}';
+  try { JSON.parse(t); return t; } catch { return '{}'; }
+}
+
+/** A call textToolCalls recovered from prose, rather than one the server emitted. */
+export const isTextCall = c => typeof c?.id === 'string' && c.id.startsWith('text_');
+
+/**
+ * The message that carries a tool's output back to the model.
+ *
+ * A call written as prose came from a runtime with no tool API, so its chat template
+ * very likely renders neither an assistant `tool_calls` field nor a `tool` role. Sent
+ * that way the result is dropped on the floor, the model sees no answer, and it writes
+ * the same call again — which is what "it cannot call tools, it just repeats itself"
+ * looks like. Those results go back as ordinary user text, which every template renders.
+ */
+export const toolResult = (call, name, out) => isTextCall(call)
+  ? { role: 'user', content: `Result of ${name}:\n\n${out}` }
+  : { role: 'tool', tool_call_id: call.id, name, content: out };
 
 /** Streamed tool-call deltas, accumulated. Some servers send `arguments` as an
     object rather than a JSON string; concatenating that yields "[object Object]". */
 export function mergeToolDeltas(calls, deltas) {
   for (const tc of deltas ?? []) {
-    const k = tc.index ?? calls.length;
+    const k = slotFor(calls, tc);
     calls[k] ??= { id: tc.id || 'call_' + k, type: 'function', function: { name: '', arguments: '' } };
     if (tc.id) calls[k].id = tc.id;
-    if (tc.function?.name) calls[k].function.name += tc.function.name;
+    const fn = calls[k].function;
+    // llama.cpp and vLLM repeat the name on every chunk. Concatenating gave
+    // "run_pythonrun_python", which matches no tool, so the model retried forever.
+    // An exact repeat is a repeat; a different fragment is a name still arriving.
+    const name = tc.function?.name;
+    if (name && fn.name !== name) fn.name += name;
     const a = tc.function?.arguments;
-    if (a != null && a !== '') calls[k].function.arguments += typeof a === 'string' ? a : JSON.stringify(a);
+    if (a != null && a !== '') {
+      const s = typeof a === 'string' ? a : JSON.stringify(a);
+      if (fn.arguments !== s) fn.arguments += s;   // some servers resend the whole object
+    }
   }
   return calls;
+}
+
+/* Which call a delta belongs to. `index` is authoritative; without it (llama.cpp
+   omits it) a chunk that names no tool is the continuation of the call already
+   being built, not a new one — otherwise each fragment became its own call and
+   every argument string was half-parsed. */
+function slotFor(calls, tc) {
+  if (tc.index != null) return tc.index;
+  if (tc.id) { const i = calls.findIndex(c => c?.id === tc.id); if (i >= 0) return i; }
+  if (!tc.function?.name && calls.length) return calls.length - 1;
+  return calls.length;
 }
 
 /**
@@ -153,4 +228,183 @@ export async function callTool(impl, name, args) {
            Object.keys(impl ?? {}).join(', ') + '. Call one of those instead.';
   try { return await fn(args); }
   catch (e) { return 'ERROR: ' + (e?.message ?? e); }
+}
+
+/**
+ * callTool, with an identical repeat short-circuited.
+ *
+ * A local model that gets a tool result it does not like re-issues the same call
+ * with the same arguments. Nothing stopped it, so one mistake ate the whole step
+ * budget and the turn ended with "(kept calling tools without answering)" - which
+ * is what "it loops and says the same thing over and over" looks like from the
+ * chat. Replaying the recorded output and naming the repeat is what lets it move on.
+ * One runner per agent loop; the memory is that loop's.
+ */
+export function toolRunner(impl, mutates = []) {
+  const seen = new Map(), writes = new Set(mutates);
+  const run = async (name, args) => {
+    const key = name + ' ' + JSON.stringify(args ?? {});
+    if (seen.has(key)) {
+      run.repeats++;
+      return `You already called ${name} with exactly these arguments. It returned:\n\n` +
+             seen.get(key) +
+             `\n\nRepeating it cannot give a different answer. Change the arguments, use a ` +
+             `different tool, or answer with what you already have.`;
+    }
+    run.repeats = 0;
+    const out = String(await callTool(impl, name, args));
+    // A tool that changes the project makes every earlier result stale: a read_file
+    // replayed from before a write_file would show the model its own edit missing.
+    if (writes.has(name)) seen.clear();
+    seen.set(key, out);
+    return out;
+  };
+  /* Telling a weak model it is repeating itself does not stop it — measured: a 9B
+     re-sent the same broken script seven times, reading the warning each time, and
+     spent the whole step budget on it. The caller watches this and forces an answer. */
+  run.repeats = 0;
+  return run;
+}
+
+/** How many identical repeats before the loop gives up and demands an answer. */
+export const REPEAT_LIMIT = 2;
+
+/**
+ * Remove a tool call the model wrote as text from an answer.
+ *
+ * On the final step tools are withheld so the turn ends in prose. A model that
+ * emits a call anyway had it shown to the user as the answer — raw
+ * `<tool_call>` XML in the chat bubble.
+ */
+export function stripToolSyntax(text) {
+  return String(text ?? '')
+    .replace(/<tool_call>[\s\S]*?<\/tool_call>/g, '')
+    .replace(/<function=[\w.-]+>[\s\S]*?<\/function>/g, '')
+    .replace(/```(?:json|tool_call|tool_code)\s*[\s\S]*?```/g, '')
+    .trim();
+}
+
+/* --------------------------- the streaming response --------------------------- */
+/**
+ * Read one OpenAI-compatible streaming response into a single assistant message.
+ *
+ * Both runtimes had their own copy of this loop and both had the same two holes:
+ * bytes left in the buffer when the stream ends were never parsed (a final frame
+ * with no trailing newline is simply lost, and it is usually the tool call), and
+ * a server that ignores `stream: true` and returns one plain JSON body produced
+ * an empty message, because every line failed the `data:` test.
+ */
+export async function readCompletion(res, { onStream, toolNames = [] } = {}) {
+  let reasoning = '', finish = '', frames = 0;
+  const think = thinkStream(onStream);
+  const calls = [];
+
+  const frame = payload => {
+    if (!payload || payload === '[DONE]') return;
+    let d;
+    try { d = JSON.parse(payload); } catch { return; }
+    frames++;
+    if (d.error) throw new Error(String(d.error.message ?? d.error));
+    const ch = d.choices?.[0];
+    if (!ch) return;
+    if (ch.finish_reason) finish = ch.finish_reason;
+    const delta = ch.delta ?? ch.message ?? {};      // non-streaming bodies use `message`
+    const th = delta.reasoning ?? delta.reasoning_content;
+    if (th) { reasoning += th; onStream?.({ type: 'thinking', text: th }); }
+    if (delta.content) think.push(delta.content);
+    mergeToolDeltas(calls, delta.tool_calls);
+  };
+  const line = l => { const t = l.trim(); if (t.startsWith('data:')) frame(t.slice(5).trim()); };
+
+  const rd = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '', raw = '';
+  for (;;) {
+    const { done, value } = await rd.read();
+    if (done) break;
+    const s = dec.decode(value, { stream: true });
+    raw += s; buf += s;
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) { line(buf.slice(0, i)); buf = buf.slice(i + 1); }
+  }
+  const tail = dec.decode();                 // flush a split multi-byte character
+  raw += tail; buf += tail;
+  if (buf.trim()) line(buf);                 // the last frame, when it had no newline
+  if (!frames && raw.trim()) frame(raw.trim());   // the server never spoke SSE at all
+
+  const split = think.end();
+  const msg = { role: 'assistant', content: split.content, finish,
+                reasoning: [reasoning, split.reasoning].filter(Boolean).join('\n') || undefined };
+  let tc = calls.filter(Boolean);
+  // a model whose runtime has no tool API writes the call as prose; take it anyway
+  if (!tc.length) tc = textToolCalls(split.content, toolNames);
+  // ...and some write it inside the scratchpad, where thinkStream had already moved it
+  if (!tc.length && split.reasoning) tc = textToolCalls(split.reasoning, toolNames);
+  if (tc.length) msg.tool_calls = tc;
+  return msg;
+}
+
+/* ------------------------------ context budget ------------------------------ */
+/* Local runtimes load a model with whatever context the app chose, usually 8192
+   even when the weights allow far more. Nothing here could exceed it, so the
+   transcript silently lost its oldest messages mid-turn: the model stopped
+   seeing the tool result it had just been given and asked for it again, which is
+   the looping. Everything below sizes the turn to fit instead.
+   ponytail: one default, overridable per model; detect it per provider only if
+   8192 turns out to be wrong often enough to matter. */
+export const CONTEXT_DEFAULT = 8192;
+const CHARS_PER_TOKEN = 3.5;
+
+/** Chars a single tool result may add. A quarter of the window, so a transcript
+    survives several of them; 40000 chars was ~3x the whole window. */
+export const resultCap = (ctx = CONTEXT_DEFAULT) =>
+  Math.max(1500, Math.round((ctx * CHARS_PER_TOKEN) / 4));
+
+export const estTokens = messages =>
+  Math.ceil(messages.reduce((n, m) =>
+    n + String(m.content ?? '').length +
+        (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0) + 16, 0) / CHARS_PER_TOKEN);
+
+/**
+ * Drop the oldest exchanges until the turn fits, keeping the system message.
+ *
+ * Cutting at an arbitrary point would leave a `tool` message whose call is gone,
+ * which strict servers reject outright, so the window always starts on a message
+ * that can stand alone.
+ */
+export function fitMessages(messages, ctx = CONTEXT_DEFAULT, reserve = 1024) {
+  const budget = Math.max(512, ctx - reserve);
+  if (estTokens(messages) <= budget) return messages;
+  const [system, ...rest] = messages;
+  const head = messages[0]?.role === 'system' ? [system] : [];
+  const body = head.length ? rest : messages;
+  let start = 0;
+  while (start < body.length && estTokens([...head, ...body.slice(start)]) > budget) start++;
+  while (start < body.length && body[start].role === 'tool') start++;   // never orphan a result
+  return [...head, ...body.slice(start)];
+}
+
+/**
+ * Check a tool call against the schema the model was given.
+ *
+ * A small model often names a tool and supplies nothing. `JSON.parse(args || '{}')`
+ * turned that into a call with no arguments, which ran and failed somewhere deeper
+ * — `run_mca_workflow` with no `question` came back "requires args.question", which
+ * tells the model nothing about what it did wrong. Naming the missing argument is
+ * what lets it recover on the next step instead of guessing again.
+ */
+export function missingArgs(defs) {
+  const need = new Map((defs ?? []).map(d =>
+    [d.function?.name, d.function?.parameters?.required ?? []]));
+  return (name, args) => {
+    const gone = (need.get(name) ?? []).filter(k => {
+      const v = args?.[k];
+      return v === undefined || v === null || (typeof v === 'string' && !v.trim());
+    });
+    return gone.length
+      ? `ERROR: ${name} requires ${gone.join(' and ')}, which you left out. You called it ` +
+        `with ${JSON.stringify(args ?? {})}. Call it again with ${gone.length > 1 ? 'those' : 'that'} ` +
+        `filled in — nothing ran.`
+      : null;
+  };
 }

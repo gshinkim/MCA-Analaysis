@@ -1,4 +1,4 @@
-import { thinkStream, textToolCalls, mergeToolDeltas } from './oai.mjs';
+import { readCompletion, fitMessages, CONTEXT_DEFAULT } from './oai.mjs';
 
 /* Reaching a model server on the user's own machine from a hosted https page.
    Chrome 141+ gates this behind the Local Network Access permission, which only
@@ -84,13 +84,18 @@ export async function probe(baseUrl){
 }
 
 /** Chat completions against the user's own machine, streamed. */
-export async function localChat({ baseUrl, apiKey, model, messages, tools, schema, signal, onStream }){
+export async function localChat({ baseUrl, apiKey, model, messages, tools, schema, signal,
+                                  onStream, contextTokens }){
   const base = baseUrl.replace(/\/+$/,'');
   const url = (/\/v\d+$/.test(base) ? base : base + '/v1') + '/chat/completions';
-  // A 27B reasoning model routinely spends more than 4k tokens thinking; capping
-  // there truncated the answer mid-tool-call, which reads as "it cannot call tools".
-  const body = { model, messages, stream: true, max_tokens: 16384, temperature: 0.2 };
+  // Sized to the window the runtime actually loaded, not to the weights' maximum:
+  // asking for more than it holds truncates the prompt instead of lengthening the
+  // answer, and that truncation is what made the model repeat itself.
+  const ctx = Number(contextTokens) > 0 ? Number(contextTokens) : CONTEXT_DEFAULT;
+  const body = { model, messages: fitMessages(messages, ctx), stream: true,
+                 max_tokens: Math.max(256, ctx >> 1), temperature: 0.2 };
   if (tools?.length) body.tools = tools;
+  else body.tool_choice = 'none';          // a server that honours it cannot emit a call
   if (schema) body.response_format = { type:'json_schema',
                                        json_schema:{ name:'result', strict:true, schema } };
   const space = spaceFor(url);
@@ -104,40 +109,9 @@ export async function localChat({ baseUrl, apiKey, model, messages, tools, schem
   if (!res.ok) throw new Error(model + ': HTTP ' + res.status + ' ' + (await res.text().catch(()=>'')).slice(0,200));
   if (!res.body) throw new Error('no response body from ' + url);
 
-  let reasoning = '', finish = '';
-  const think = thinkStream(onStream);
-  const calls = [];
-  const rd = res.body.getReader(), dec = new TextDecoder();
-  let buf = '';
-  for(;;){
-    const { done, value } = await rd.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf('\n')) >= 0){
-      const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-      if (!line.startsWith('data:')) continue;
-      const p = line.slice(5).trim();
-      if (p === '[DONE]') continue;
-      let d; try { d = JSON.parse(p); } catch { continue; }
-      if (d.error) throw new Error(String(d.error.message ?? d.error));
-      const ch = d.choices?.[0];
-      if (ch?.finish_reason) finish = ch.finish_reason;
-      const delta = ch?.delta ?? {};
-      const th = delta.reasoning ?? delta.reasoning_content;
-      if (th) { reasoning += th; onStream?.({ type:'thinking', text: th }); }
-      if (delta.content) think.push(delta.content);   // splits inline <think> as it streams
-      mergeToolDeltas(calls, delta.tool_calls);
-    }
-  }
-  const split = think.end();
-  const msg = { role:'assistant', content: split.content,
-                reasoning: [reasoning, split.reasoning].filter(Boolean).join('\n') || undefined };
-  let tc = calls.filter(Boolean);
-  // a model whose runtime has no tool API writes the call as prose; take it anyway
-  if (!tc.length) tc = textToolCalls(split.content, (tools ?? []).map(t => t.function?.name));
-  if (tc.length) msg.tool_calls = tc;
-  else if (finish === 'length') onStream?.({ type:'log',
+  const msg = await readCompletion(res, {
+    onStream, toolNames: (tools ?? []).map(t => t.function?.name) });
+  if (!msg.tool_calls?.length && msg.finish === 'length') onStream?.({ type:'log',
     text: model + ' hit its token limit before finishing — the answer is cut off.' });
   return msg;
 }

@@ -22,6 +22,13 @@ const IN = typeof args === 'string' ? { question: args } : (args ?? {})
 const question = (IN.question ?? '').trim()
 const model = (IN.model ?? '').trim()
 const workdir = (IN.workdir ?? './mca-tellurium-runs/current').trim()
+/* How THIS runtime executes a computation. Claude Code writes a script and runs it
+   with Bash; the local server runtime has run_python; the browser has typed
+   Tellurium tools and no shell at all. Hard-coding "run it with Bash" ordered two
+   of the three to call a tool they do not have, in the one stage they cannot skip. */
+const exec = (IN.exec ?? '').trim() ||
+  `Write a single runnable script into ${workdir} (create it if needed), run it with ` +
+  `Bash, and keep both the script and its output on disk — they are the reproducibility record.`
 const needsNumbers = IN.needsNumbers !== false
 const maxRepairs = Number.isInteger(IN.maxRepairs) ? IN.maxRepairs : 2
 
@@ -33,7 +40,7 @@ if (!question) {
 }
 
 const SKILL = (name) =>
-  `Load the \`${name}\` Skill first: call the Skill tool with skill: "${name}". Use that Skill's own routing table to pull ONLY the reference files this question needs — loading the knowledge base wholesale is a defect, not thoroughness. If the Skill tool is unavailable to you, read .claude/skills/${name}/SKILL.md and route from its tables instead. Never assert anything this Skill is the authority on from your own memory.`
+  `Load the \`${name}\` Skill first, with whichever tool this runtime gives you for that. Use that Skill's own routing table to pull ONLY the reference files this question needs — loading the knowledge base wholesale is a defect, not thoroughness. Never assert anything this Skill is the authority on from your own memory.`
 
 const CONTEXT = `
 QUESTION FOR THIS INVOCATION:
@@ -232,9 +239,8 @@ DOCUMENTED CALLS: ${plan.calls.join(' | ')}
 TRAPS TO AVOID: ${plan.traps.join(' | ')}
 MODEL PATH: ${plan.build_path}
 ${correction ? `\nTHIS IS ATTEMPT ${attempt}. A previous run failed validation. Apply exactly this correction and change nothing else:\n${correction}\n` : ''}
-Write a single runnable script into ${workdir} (create it if needed), run it with
-Bash, and keep both the script and its output on disk — they are the
-reproducibility record. Report the numbers labelled from the model's own id
+${exec}
+Report the numbers labelled from the model's own id
 lists, and report the steady-state evidence verbatim as the software returned it.
 Report what happened, including a failure. Do not interpret anything.`,
     { label: attempt > 1 ? `execute:retry-${attempt}` : 'execute', phase: 'Execute', schema: EXEC },

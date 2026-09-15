@@ -266,7 +266,7 @@ const routes = {
     process.nextTick(() => {});
     const run = runtime === 'openai'
       ? runLocalAgent({ root: ROOT, prompt: message, history: history || [], chatCfg,
-                        useWorkflow, liveModel: before, onEvent })
+                        useWorkflow, liveModel: before, te, onEvent })
       : runAgent({ root: ROOT, prompt: message, sessionId, model, env: env || {},
                    useWorkflow, liveModel: before, onEvent });
     send({ type: 'session', sessionId: run.sessionId ?? sessionId ?? null, runtime: runtime || 'claude-code' });

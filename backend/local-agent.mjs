@@ -1,8 +1,9 @@
 import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
-import { thinkStream, textToolCalls, mergeToolDeltas, forHistory, TEXT_TOOL_PROTOCOL, callTool }
-  from '../web/js/oai.mjs';
+import { forHistory, toolRunner, toolResult, readCompletion, fitMessages, resultCap,
+         CONTEXT_DEFAULT, REPEAT_LIMIT, stripToolSyntax, missingArgs } from '../web/js/oai.mjs';
+import { localSystem } from '../web/js/prompt.mjs';
 
 /* A second agent runtime for models that are not Claude Code: anything speaking
    OpenAI-compatible /v1/chat/completions (Ollama, LM Studio, llama-server, a GGUF
@@ -13,14 +14,16 @@ import { thinkStream, textToolCalls, mergeToolDeltas, forHistory, TEXT_TOOL_PROT
    agent()/phase()/log(). The user's workflow drives the local model verbatim. */
 
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-const stripFrontmatter = md => md.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
 
 /* ------------------------------- provider ------------------------------- */
 export class Chat {
-  constructor({ baseUrl, apiKey, model }) {
+  constructor({ baseUrl, apiKey, model, contextTokens }) {
     this.url = String(baseUrl || '').replace(/\/+$/, '');
     if (!/\/v\d+$/.test(this.url)) this.url += '/v1';
     this.apiKey = apiKey; this.model = model;
+    // What the runtime loaded the model with, not what the weights allow: LM
+    // Studio and Ollama both default well below the maximum.
+    this.ctx = Number(contextTokens) > 0 ? Number(contextTokens) : CONTEXT_DEFAULT;
   }
 
   /* Always streams. A slow local model can sit well past Node's 300s fetch
@@ -30,9 +33,15 @@ export class Chat {
      tokens reach the UI as they are produced. */
   // A 27B reasoning model routinely spends more than 4k tokens thinking; capping
   // there truncated the answer mid-tool-call, which reads as "it cannot call tools".
-  async complete({ messages, tools, schema, signal, onStream, maxTokens = 16384 }) {
-    const body = { model: this.model, messages, max_tokens: maxTokens, temperature: 0.2, stream: true };
+  async complete({ messages, tools, schema, signal, onStream, maxTokens }) {
+    // Asking for more than the window holds is not a bigger answer, it is a
+    // truncated prompt. Leave room for the reply inside the same budget.
+    const fitted = fitMessages(messages, this.ctx);
+    const cap = Math.max(256, Math.min(maxTokens ?? 4096, this.ctx >> 1));
+    const body = { model: this.model, messages: fitted, max_tokens: cap,
+                   temperature: 0.2, stream: true };
     if (tools?.length) body.tools = tools;
+    else body.tool_choice = 'none';        // a server that honours it cannot emit a call
     if (schema) body.response_format = {
       type: 'json_schema', json_schema: { name: 'result', strict: true, schema } };
 
@@ -55,47 +64,37 @@ export class Chat {
     }
     if (!res.body) throw new Error('no response body from ' + this.url);
 
-    let reasoning = '', finish = '';
-    const think = thinkStream(onStream);
-    const calls = [];
-    const dec = new TextDecoder();
-    let buf = '';
-    for await (const chunk of res.body) {
-      buf += dec.decode(chunk, { stream: true });
-      let i;
-      while ((i = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-        if (!line.startsWith('data:')) continue;
-        const payload = line.slice(5).trim();
-        if (payload === '[DONE]') continue;
-        let d;
-        try { d = JSON.parse(payload); } catch { continue; }
-        if (d.error) throw new Error(String(d.error.message ?? d.error));
-        const ch = d.choices?.[0];
-        if (!ch) continue;
-        if (ch.finish_reason) finish = ch.finish_reason;
-        const delta = ch.delta ?? ch.message ?? {};
-        const th = delta.reasoning ?? delta.reasoning_content;
-        if (th) { reasoning += th; onStream?.({ type: 'thinking', text: th }); }
-        if (delta.content) think.push(delta.content);  // splits inline <think> as it streams
-        mergeToolDeltas(calls, delta.tool_calls);
-      }
-    }
-    const split = think.end();
-    const msg = { role: 'assistant', content: split.content,
-                  reasoning: [reasoning, split.reasoning].filter(Boolean).join('\n') || undefined };
-    let tc = calls.filter(Boolean);
-    // a model whose runtime has no tool API writes the call as prose; take it anyway
-    if (!tc.length) tc = textToolCalls(split.content, (tools ?? []).map(t => t.function?.name));
-    if (tc.length) msg.tool_calls = tc;
-    else if (finish === 'length') onStream?.({ type: 'log',
+    const msg = await readCompletion(res, {
+      onStream, toolNames: (tools ?? []).map(t => t.function?.name) });
+    if (!msg.tool_calls?.length && msg.finish === 'length') onStream?.({ type: 'log',
       text: this.model + ' hit its token limit before finishing - the answer is cut off.' });
     return msg;
   }
 }
 
 /* --------------------------------- tools --------------------------------- */
-function makeTools(root, emit) {
+// Tools that change the project. A repeat of any call is replayed from memory
+// (see toolRunner), so anything that writes has to invalidate that memory.
+const WRITES = ['write_file', 'run_python', 'run_mca_workflow'];
+
+/* Tools that produce a number. Reading the model is not computing with it: a model
+   that reads `k=0.4` and then reports a flux of 1.2 worked it out in its head, which
+   is the one thing the agent is not allowed to do. The answer is still shown — it is
+   labelled, so the user knows nothing behind the number was checked. */
+const COMPUTES = new Set(['run_python', 'run_mca_workflow']);
+const hasNumber = t => /\d/.test(String(t ?? ''));
+
+/* A model that has not read the tellurium Skill invents the API and burns a step
+   per guess — measured: five attempts at loadAntimonyModel / Simulator / SBMLReader
+   before one worked. The traceback alone never points anywhere; this does. */
+const apiHint = stderr => /AttributeError|ImportError|ModuleNotFoundError|NameError/.test(stderr || '')
+  && /tellurium|roadrunner|antimony|\bte\b/i.test(stderr || '')
+  ? '\n\n[hint] That is not the documented API. Call load_skill("tellurium") and route ' +
+    'from its tables to the right reference before writing this script again — guessing ' +
+    'another attribute name will fail the same way.'
+  : '';
+
+function makeTools(root, emit, te, cap = resultCap()) {
   const jail = p => {
     const abs = resolve(root, p || '.');
     if (!abs.startsWith(root)) throw new Error('path escapes the project: ' + p);
@@ -113,10 +112,18 @@ function makeTools(root, emit) {
     },
     async read_file({ path }) {
       const t = await readFile(jail(path), 'utf8');
-      return t.length > 60000 ? t.slice(0, 60000) + '\n…[truncated]' : t;
+      return t.length > cap ? t.slice(0, cap) + '\n…[truncated — read a narrower path]' : t;
     },
     async write_file({ path, content }) {
       const abs = jail(path);
+      // The live model is the text in the user's editor. Antimony that does not load
+      // would replace it with something broken they cannot get back, so it is checked
+      // first — the same gate web/js/agent.mjs already applies to write_model.
+      if (te && abs === join(root, 'workspace/model.txt')) {
+        const r = await te.call('info', { model: String(content ?? '') });
+        if (!r.ok) return 'REJECTED — that Antimony does not load: ' + r.error +
+          '\nThe live model is unchanged. Fix it and call write_file again.';
+      }
       await mkdir(dirname(abs), { recursive: true });
       await writeFile(abs, content);
       return 'wrote ' + relative(root, abs) + ' (' + content.length + ' bytes)';
@@ -133,8 +140,9 @@ function makeTools(root, emit) {
       return await new Promise(res => {
         execFile(py, [file], { cwd: root, timeout: 180000, maxBuffer: 8e6 },
           (err, out, errOut) => res(
-            (out || '') + (errOut ? '\n[stderr]\n' + errOut : '') +
-            (err && !out && !errOut ? '\n[failed] ' + err.message : '') || '(no output)'));
+            ((out || '') + (errOut ? '\n[stderr]\n' + errOut : '') +
+             (err && !out && !errOut ? '\n[failed] ' + err.message : '') || '(no output)')
+            + apiHint(errOut)));
       });
     },
   };
@@ -162,21 +170,28 @@ function makeTools(root, emit) {
 
 /* ------------------------------- agent loop ------------------------------- */
 async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
-                          maxSteps = 12, stageMs = 900000 }) {
+                          maxSteps = 12, stageMs = 900000, cap = resultCap() }) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: prompt }];
   const t0 = Date.now();
+  const run = toolRunner(tools.impl, WRITES);
+  const lacks = missingArgs(tools.defs);
   // A local 27B running seven sequential stages is slow but not dead — say so.
   const beat = setInterval(() => emit({ type: 'heartbeat', seconds: Math.round((Date.now()-t0)/1000) }), 15000);
   try {
   for (let step = 0; step < maxSteps; step++) {
     if (signal?.aborted) throw new Error('aborted');
-    if (Date.now() - t0 > stageMs) {
-      emit({ type: 'log', text: 'stage exceeded its time budget; forcing an answer' });
-      break;
-    }
+    // Out of steps or out of time: ask once more with NO tools, so the model has to
+    // answer. Breaking out here instead handed the stage back empty, which is what
+    // the user saw as the agent going round in circles and then saying nothing.
+    const stuck = run.repeats >= REPEAT_LIMIT;
+    const wrapUp = step === maxSteps - 1 || Date.now() - t0 > stageMs || stuck;
+    if (wrapUp) emit({ type: 'log', text: stuck
+      ? 'same call repeated ' + run.repeats + 'x; answering with what it has'
+      : 'stage is out of ' + (step === maxSteps - 1 ? 'steps' : 'time') +
+        '; answering with what it has' });
     // Ask for the schema only once the model has stopped calling tools; many local
     // models cannot emit a tool call and a constrained JSON object in one turn.
-    const m = await chat.complete({ messages, tools: tools.defs, signal,
+    const m = await chat.complete({ messages, tools: wrapUp ? undefined : tools.defs, signal,
       onStream: ev => { if (ev.type === 'thinking') emit(ev); } });
     messages.push(forHistory(m));
     const calls = m.tool_calls ?? [];
@@ -189,9 +204,8 @@ async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
       let args = {};
       try { args = JSON.parse(c.function?.arguments || '{}'); } catch {}
       emit({ type: 'tools', tools: [{ name, input: args }] });
-      const out = await callTool(tools.impl, name, args);
-      messages.push({ role: 'tool', tool_call_id: c.id, name,
-                      content: String(out).slice(0, 40000) });
+      const out = lacks(name, args) ?? await run(name, args);
+      messages.push(toolResult(c, name, String(out).slice(0, cap)));
     }
   }
   if (!schema) return '(the model kept calling tools without answering)';
@@ -239,16 +253,16 @@ function fill(obj, schema) {
 }
 
 /* --------------------------- the workflow, verbatim --------------------------- */
-export async function runWorkflowFile({ root, chat, args, emit, signal }) {
+export async function runWorkflowFile({ root, chat, args, emit, signal, te }) {
   const src = await readFile(join(root, 'workflows/mca-tellurium.js'), 'utf8');
   const body = src.replace(/^\s*export\s+const\s+meta\s*=/m, 'const meta =');
-  const system = stripFrontmatter(await readFile(join(root, 'agents/model-scientist.md'), 'utf8'))
-    + '\n\n' + RUNTIME_NOTE;
-  const tools = makeTools(root, emit);
+  const cap = resultCap(chat.ctx);
+  const system = localSystem({ tools: TOOL_NAMES, liveModel: args?.model ?? '', howToRun: HOW_TO_RUN });
+  const tools = makeTools(root, emit, te, cap);
 
   const agent = async (prompt, opts = {}) => {
     emit({ type: 'phase', phase: opts.phase, label: opts.label });
-    return toolLoop({ chat, system, prompt, tools, schema: opts.schema, emit, signal });
+    return toolLoop({ chat, system, prompt, tools, schema: opts.schema, emit, signal, cap });
   };
   const phase = title => emit({ type: 'phase', phase: title });
   const log = msg => emit({ type: 'log', text: String(msg) });
@@ -257,33 +271,23 @@ export async function runWorkflowFile({ root, chat, args, emit, signal }) {
   return await fn(agent, phase, log, args);
 }
 
-const RUNTIME_NOTE = `
-## Runtime
+const TOOL_NAMES = ['load_skill', 'read_file', 'write_file', 'list_dir', 'run_python'];
 
-You are running inside MCA Atlas on a local model runtime. You have exactly these
-tools: load_skill, read_file, write_file, list_dir, run_python - and nothing else.
+const HOW_TO_RUN = `THE LIVE MODEL is \`workspace/model.txt\`. Write that file to change what the user sees.
 
-Everything below this section was written for a different runtime and names tools
-that do not exist here. Translate as you read; calling any of the left-hand names
-fails:
+\`run_python\` is your shell: it runs a Python script with tellurium, roadrunner, numpy
+and scipy importable, and returns only stdout — so print everything you need. Scripts
+are kept in workspace/runs/. There is no separate terminal; run_python is it.`;
 
-    Read   ->  read_file          Write / Edit  ->  write_file
-    Glob   ->  list_dir           Bash          ->  run_python
-    Skill  ->  load_skill  (then route from that Skill's own tables)
-    Workflow  ->  run_mca_workflow
-
-THE LIVE MODEL is workspace/model.txt in Antimony. It is the text in the user's
-editor. Change what the user sees by writing that file.
-
-run_python already has tellurium, roadrunner, numpy and scipy importable. Only
-stdout comes back, so print everything you need. Scripts are kept in workspace/runs/.
-
-${TEXT_TOOL_PROTOCOL}
-`.trim();
+/* Handed to the workflow, which otherwise tells every stage to "run it with Bash". */
+const EXEC_NOTE =
+  'Run the computation with `run_python`: one self-contained script, printing every ' +
+  'number you will report. Only stdout comes back. Save it with `write_file` under ' +
+  'workspace/runs/ first if you want the script kept as the reproducibility record.';
 
 /* ------------------------------ the outer turn ------------------------------ */
 export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow = true,
-                               liveModel = '', onEvent }) {
+                               liveModel = '', te, onEvent }) {
   const ctrl = new AbortController();
   const emit = o => onEvent(o);
   if (!chatCfg?.baseUrl || !chatCfg?.model) {
@@ -295,31 +299,22 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
     return { kill(){} };
   }
   const chat = new Chat(chatCfg);
-  const tools = makeTools(root, emit);
+  const cap = resultCap(chat.ctx);
+  const tools = makeTools(root, emit, te, cap);
 
   (async () => {
     try {
-      const base = stripFrontmatter(
-        await readFile(join(root, 'agents/model-scientist.md'), 'utf8')) + '\n\n' + RUNTIME_NOTE +
-        (liveModel.trim()
-          ? `\n\n## The live model, as of this message\n\nThis is the current content of ` +
-            `workspace/model.txt. You can see it; never ask the user whether a model exists ` +
-            `or to paste one. Re-read the file before editing it.\n\n\`\`\`\n${liveModel.trim()}\n\`\`\``
-          : `\n\nworkspace/model.txt is currently EMPTY. If the user asks for a model, ` +
-            `write one there yourself - do not ask them to supply one.`);
-      const system = base + (useWorkflow
-        ? `\n\nYou also have run_mca_workflow. Every analysis - anything about control, ` +
-          `elasticities, control coefficients, steady state in a control context, or any ` +
-          `claim needing numbers - MUST go through it. Answer directly only for trivial ` +
-          `questions that need no computation.`
-        : `\n\n## Workflow disabled for this session\n\n` +
-          `The mca-tellurium workflow is NOT available - the user turned it off because the ` +
-          `seven-stage sequence is slow. Do not ask for it back and do not refuse the work.\n\n` +
-          `Do the analysis directly and keep every other rule: read the model before any claim ` +
-          `about it, load_skill('mca') / load_skill('tellurium') before asserting anything they ` +
-          `are the authority on, compute nothing from memory - every number comes from a ` +
-          `run_python call you made - and say how well supported each part of your answer is. ` +
-          `Be proportionate: a short question gets a short, direct answer.`);
+      const system = localSystem({
+        tools: useWorkflow ? [...TOOL_NAMES, 'run_mca_workflow'] : TOOL_NAMES,
+        liveModel, howToRun: HOW_TO_RUN,
+        extra: useWorkflow
+          ? '\n## The workflow\n\nAnything needing numbers — control, elasticities, control ' +
+            'coefficients, steady state in a control context — MUST go through `run_mca_workflow`. ' +
+            'Answer directly only for questions that need no computation.'
+          : '\n## The workflow is off\n\nThe user turned the seven-stage workflow off because it ' +
+            'is slow. Do not ask for it back and do not refuse the work — do the analysis yourself, ' +
+            'keeping every rule above.',
+      });
 
       const wfDef = { type: 'function', function: {
         name: 'run_mca_workflow',
@@ -333,27 +328,38 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
       const allTools = { impl: {
         ...tools.impl,
         run_mca_workflow: async ({ question, needsNumbers = true }) => {
+          // The model names the workflow and often supplies no question. It is
+          // always this turn's question, so use it rather than failing the stage.
+          question = String(question ?? '').trim() || prompt;
           emit({ type: 'workflow_start' });
           const model = await readFile(join(root, 'workspace/model.txt'), 'utf8').catch(() => '');
           const out = await runWorkflowFile({
-            root, chat, emit, signal: ctrl.signal,
-            args: { question, model, needsNumbers, workdir: 'workspace/runs' },
+            root, chat, emit, te, signal: ctrl.signal,
+            args: { question, model, needsNumbers, workdir: 'workspace/runs', exec: EXEC_NOTE },
           });
           emit({ type: 'workflow_done' });
-          return JSON.stringify(out).slice(0, 40000);
+          return JSON.stringify(out).slice(0, cap);
         },
       }, defs: useWorkflow ? [...tools.defs, wfDef] : tools.defs };
 
       const messages = [{ role: 'system', content: system }, ...history,
                         { role: 'user', content: prompt }];
-      let final = '', usedTools = false;
-      for (let step = 0; step < 14; step++) {
+      const run = toolRunner(allTools.impl, WRITES);
+      const lacks = missingArgs(allTools.defs);
+      let final = '', usedTools = false, computed = false;
+      const STEPS = 14;
+      for (let step = 0; step < STEPS; step++) {
         if (ctrl.signal.aborted) break;
-        const m = await chat.complete({ messages, tools: allTools.defs, signal: ctrl.signal,
-          onStream: emit });                       // outer turn: thinking and tokens both
+        // ...or as soon as it is plainly stuck: a repeated call warned about twice
+        // will be repeated a third time, and each one costs a step.
+        const stuck = run.repeats >= REPEAT_LIMIT;
+        if (stuck) emit({ type: 'log', text: 'same call repeated; asking for the answer' });
+        const wrapUp = step === STEPS - 1 || stuck;
+        const m = await chat.complete({ messages, tools: wrapUp ? undefined : allTools.defs,
+          signal: ctrl.signal, onStream: emit }); // outer turn: thinking and tokens both
         messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
-        if (!calls.length) { final = m.content ?? ''; break; }
+        if (!calls.length) { final = stripToolSyntax(m.content); break; }
         usedTools = true;
         for (const c of calls) {
           const name = c.function?.name;
@@ -361,13 +367,13 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
           try { a = JSON.parse(c.function?.arguments || '{}'); } catch {}
           if (name !== 'run_mca_workflow') emit({ type: 'tools', tools: [{ name, input: a }] });
           else emit({ type: 'tools', tools: [{ name: 'Workflow', input: { workflow: 'mca-tellurium' } }] });
-          const out = await callTool(allTools.impl, name, a);
-          messages.push({ role: 'tool', tool_call_id: c.id, name,
-                          content: String(out).slice(0, 40000) });
+          if (COMPUTES.has(name)) computed = true;
+          const out = lacks(name, a) ?? await run(name, a);
+          messages.push(toolResult(c, name, String(out).slice(0, cap)));
         }
       }
       emit({ type: 'result', text: final || '(the model produced no final answer)',
-             isError: !final, noTools: !usedTools });
+             isError: !final, noTools: !usedTools, unverified: !computed && hasNumber(final) });
       emit({ type: 'done', code: 0 });
     } catch (e) {
       emit({ type: 'fatal', error: String(e.message || e) });

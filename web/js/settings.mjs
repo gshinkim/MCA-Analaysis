@@ -15,8 +15,21 @@ const BUILTIN = [
   { id:'sonnet', t:'Claude Sonnet 5' },
   { id:'haiku',  t:'Claude Haiku 4.5' },
 ];
-const DEF = { endpoints: [], local:'none', useWorkflow: true, localCfg:{
+const DEF = { endpoints: [], useWorkflow: true, localCfg:{
   olUrl:'http://localhost:11434', lmUrl:'http://localhost:1234', ggufPath:'', ggufUrl:'http://localhost:8080' } };
+
+/* Every local server the settings pane can hold. This used to be a radio group, so
+   only one could be configured at a time and choosing Ollama hid the LM Studio
+   models you had already connected. They are independent servers; there is no
+   reason to pick. */
+const LOCAL = [
+  { id:'ollama',   label:'Ollama',      url:'olUrl',   models:'olModels',   ctx:'olCtx',
+    ph:'http://localhost:11434' },
+  { id:'lmstudio', label:'LM Studio',   url:'lmUrl',   models:'lmModels',   ctx:'lmCtx',
+    ph:'http://localhost:1234' },
+  { id:'gguf',     label:'llama.cpp / GGUF server', url:'ggufUrl', models:'ggufModels', ctx:'ggufCtx',
+    ph:'http://localhost:8080' },
+];
 
 export const settings = () => ({ ...DEF, ...store.get('settings', {}),
                                  localCfg: { ...DEF.localCfg, ...(store.get('settings',{}).localCfg||{}) } });
@@ -37,15 +50,17 @@ export function resolveModel(sel){
     const i = model.lastIndexOf('|');
     return { runtime:'openai', chatCfg:{ baseUrl: model.slice(0,i), model: model.slice(i+1) } };
   }
+  const L = LOCAL.find(l => l.id === kind);
+  if(L) return { runtime:'openai', chatCfg:{
+    baseUrl: s.localCfg[L.url], model: model || 'local',
+    contextTokens: +s.localCfg[L.ctx] || undefined } };
   if(kind==='ep'){
     const i = +model.split('|')[0], name = model.split('|').slice(1).join('|');
     const ep = s.endpoints[i];
-    return ep ? { runtime:'openai', chatCfg:{ baseUrl: ep.base, apiKey: ep.key, model: name } }
+    return ep ? { runtime:'openai', chatCfg:{ baseUrl: ep.base, apiKey: ep.key, model: name,
+                                              contextTokens: +ep.ctx || undefined } }
               : { runtime:'claude-code', model:'opus' };
   }
-  if(kind==='ollama')   return { runtime:'openai', chatCfg:{ baseUrl: s.localCfg.olUrl,   model } };
-  if(kind==='lmstudio') return { runtime:'openai', chatCfg:{ baseUrl: s.localCfg.lmUrl,   model } };
-  if(kind==='gguf')     return { runtime:'openai', chatCfg:{ baseUrl: s.localCfg.ggufUrl, model: model||'local' } };
   return { runtime:'claude-code', model:'opus' };
 }
 
@@ -61,18 +76,17 @@ export function modelOptions(){
   s.endpoints.forEach((e,i)=>(e.models||'').split(',').map(m=>m.trim()).filter(Boolean)
     .forEach(m=>out.push({ v:'ep:'+i+'|'+m, t:(e.name||'Endpoint')+' · '+m })));
   const local = s.localCfg;
-  if(s.local==='ollama')   (local.olModels||'').split(',').map(m=>m.trim()).filter(Boolean)
-    .forEach(m=>out.push({ v:'ollama:'+m, t:'Ollama · '+m }));
-  if(s.local==='lmstudio') (local.lmModels||'').split(',').map(m=>m.trim()).filter(Boolean)
-    .forEach(m=>out.push({ v:'lmstudio:'+m, t:'LM Studio · '+m }));
-  if(s.local==='gguf'){
-    // the id the server serves, not the filename — a strict server 404s on a filename
-    const served = (local.ggufModels||'').split(',').map(m=>m.trim()).filter(Boolean);
-    if(served.length) served.forEach(m=>out.push({ v:'gguf:'+m, t:'Local · '+m }));
-    else if(local.ggufPath)
-      out.push({ v:'gguf:'+local.ggufPath.split('/').pop(), t:'GGUF · '+local.ggufPath.split('/').pop() });
+  // every server that has models, all at once — the picker is the only place they meet
+  LOCAL.forEach(L => (local[L.models]||'').split(',').map(m=>m.trim()).filter(Boolean)
+    .forEach(m => out.push({ v:L.id+':'+m, t:L.label+' · '+m })));
+  // a GGUF path with no served id: the server names it, so fall back to the filename
+  if(!(local.ggufModels||'').trim() && local.ggufPath){
+    const f = local.ggufPath.split('/').pop();
+    out.push({ v:'gguf:'+f, t:'GGUF · '+f });
   }
-  return out;
+  // two servers can serve a model of the same name; keep the first, drop exact dupes
+  const seen = new Set();
+  return out.filter(o => !seen.has(o.v) && seen.add(o.v));
 }
 
 export function fillModels(){
@@ -187,51 +201,61 @@ function renderEndpoints(){
 }
 
 /* ---- local models tab ---- */
+/* Every server is rendered; there is no "which one" any more. Connect as many as
+   you run and all of their models land in the picker together. */
 function renderLocal(){
-  $$('input[name=loc]').forEach(r=>{ r.checked=r.value===draft.local;
-    r.onchange=()=>{ draft.local=r.value; renderLocal(); }; });
   const c=$('#locCfg'); c.textContent='';
   const cfg=draft.localCfg;
 
-  const field=(lb,key,ph)=>{
+  const field=(parent,lb,key,ph,type)=>{
     const d=document.createElement('div'); d.style.marginBottom='10px';
-    d.innerHTML='<label class="lb">'+lb+'</label><input class="field">';
-    const i=d.querySelector('input'); i.placeholder=ph||''; i.value=cfg[key]||'';
-    i.oninput=()=>{ cfg[key]=i.value; }; c.append(d); return i;
-  };
-  const server=(lb,urlKey,modelsKey,ph)=>{
-    const url=field(lb,urlKey,ph);
-    const row=document.createElement('div'); row.style.marginBottom='10px';
-    row.innerHTML='<button class="btn sm">Connect to this server</button><div class="probe"></div>';
-    const out=row.querySelector('.probe');
-    row.querySelector('button').onclick=async()=>{
-      const m=await probe(url.value,'',out);
-      if(m?.length){ cfg[modelsKey]=m.join(', '); const f=c.querySelector('[data-models]'); if(f) f.value=cfg[modelsKey]; } };
-    c.append(row);
-    const ms=field('Models (comma-sep)',modelsKey,'filled in by Connect');
-    ms.dataset.models='1'; ms.value=cfg[modelsKey]||'';
+    d.innerHTML='<label class="lb"></label><input class="field">';
+    d.querySelector('label').textContent=lb;
+    const i=d.querySelector('input');
+    i.placeholder=ph||''; i.value=cfg[key]||''; if(type) i.type=type;
+    i.oninput=()=>{ cfg[key]=i.value; }; parent.append(d); return i;
   };
 
-  if(draft.local==='ollama')   server('Ollama server URL','olUrl','olModels','http://localhost:11434');
-  if(draft.local==='lmstudio') server('LM Studio server URL','lmUrl','lmModels','http://localhost:1234');
-  if(draft.local==='gguf'){
-    const d=document.createElement('div'); d.style.marginBottom='10px';
-    d.innerHTML='<label class="lb">GGUF file</label><div class="browse">'+
-                '<input class="field" placeholder="/path/to/model.Q4_K_M.gguf">'+
-                '<button class="btn sm">Browse…</button></div>';
-    const inp=d.querySelector('input'); inp.value=cfg.ggufPath||'';
-    inp.oninput=()=>{ cfg.ggufPath=inp.value; };
-    d.querySelector('button').onclick=async()=>{
-      const p=await pickFile({ title:'Choose a .gguf model', ext:'.gguf' });
-      if(p){ cfg.ggufPath=p; inp.value=p; }
-    };
-    c.append(d);
-    server('Server URL that is serving it','ggufUrl','ggufModels','http://localhost:8080');
-    const note=document.createElement('p'); note.className='hint';
-    note.innerHTML='A .gguf file is weights, not a server. Serve it first, then point the URL above at it:<br>'+
-      '<code>llama-server -m &lt;file&gt; --port 8080</code> &nbsp;or&nbsp; <code>lms load &lt;file&gt;</code>';
-    c.append(note);
-  }
+  LOCAL.forEach(L=>{
+    const box=document.createElement('div'); box.className='keyrow'; box.style.display='block';
+    const h=document.createElement('b'); h.textContent=L.label; h.style.display='block';
+    h.style.marginBottom='8px'; box.append(h);
+
+    const url=field(box,'Server URL',L.url,L.ph);
+    if(L.id==='gguf'){
+      const d=document.createElement('div'); d.style.marginBottom='10px';
+      d.innerHTML='<label class="lb">GGUF file (optional)</label><div class="browse">'+
+                  '<input class="field" placeholder="/path/to/model.Q4_K_M.gguf">'+
+                  '<button class="btn sm">Browse…</button></div>';
+      const inp=d.querySelector('input'); inp.value=cfg.ggufPath||'';
+      inp.oninput=()=>{ cfg.ggufPath=inp.value; };
+      d.querySelector('button').onclick=async()=>{
+        const p=await pickFile({ title:'Choose a .gguf model', ext:'.gguf' });
+        if(p){ cfg.ggufPath=p; inp.value=p; } };
+      box.append(d);
+    }
+
+    const row=document.createElement('div'); row.style.marginBottom='10px';
+    row.innerHTML='<button class="btn sm">Connect</button><div class="probe"></div>';
+    const out=row.querySelector('.probe');
+    box.append(row);
+    const ms=field(box,'Models (comma-sep)',L.models,'filled in by Connect');
+    // The one number that decides whether a local model can work at all: the window
+    // the runtime loaded it with, which is usually far below what the weights allow.
+    const cx=field(box,'Context window (tokens)',L.ctx,'8192 if unsure','number');
+    cx.min='512';
+    row.querySelector('button').onclick=async()=>{
+      const m=await probe(url.value,'',out);
+      if(m?.length){ cfg[L.models]=m.join(', '); ms.value=cfg[L.models]; } };
+    c.append(box);
+  });
+
+  const note=document.createElement('p'); note.className='hint';
+  note.innerHTML='A .gguf file is weights, not a server — serve it first: '+
+    '<code>llama-server -m &lt;file&gt; --port 8080</code> or <code>lms load &lt;file&gt;</code>.<br>'+
+    'Context window matters: the system prompt plus one tool result has to fit inside it. '+
+    'Below about 8k, expect short answers and repeated tool calls.';
+  c.append(note);
 }
 
 /* ---- drawer ---- */
