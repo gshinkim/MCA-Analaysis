@@ -226,6 +226,7 @@
     <button class="tab" role="tab" aria-selected="true" data-tab="env">Runtime</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="keys">Endpoints</button>
     <button class="tab" role="tab" aria-selected="false" data-tab="local">Local models</button>
+    <button class="tab" role="tab" aria-selected="false" data-tab="budget">Budget</button>
   </div>
   <div class="body">
     <div class="sect" data-panel="env">
@@ -268,6 +269,12 @@
         you use — every model you connect appears in the picker together, so Ollama and LM Studio
         can be live at the same time.</p>
       <div id="locCfg" style="margin-top:12px"></div>
+    </div>
+    <div class="sect" data-panel="budget" hidden>
+      <p class="hint" style="margin:0 0 14px">How much of the model&rsquo;s context window each part of a
+        turn may take, and how long it may keep working. Applies to local and endpoint models; the
+        Claude Code runtime manages its own. Drag &mdash; the numbers update as you go.</p>
+      <div id="budgetBox"></div>
     </div>
   </div>
   <div class="ft">

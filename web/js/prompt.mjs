@@ -18,8 +18,13 @@ import { TEXT_TOOL_PROTOCOL } from './oai.mjs';
 const RULES = `
 ## How you work
 
-- **Read before you claim.** Read the live model before saying anything about it.
+- **Read before you claim.** Call the read tool before saying anything about the
+  model. The copy shown below is a snapshot taken when this turn started, for
+  orientation only — it is not a read, and it goes stale the moment you write.
   Never ask the user whether a model exists or to paste one — look.
+- **A model only exists once you have written it.** Antimony in your reply changes
+  nothing the user has open. "Create / write / make / fix / change the model" is a
+  write call first, then the explanation — never a code fence instead of the call.
 - **Never compute or recall a number.** Every number you report comes from a tool
   call you made in this turn. No tool output, no number. "About 0.7" from memory
   is a defect, not an estimate.
@@ -49,6 +54,10 @@ export const FORMAT = [
   '- a Markdown table for any set of coefficients, rates or comparisons',
   '- `` `backticks` `` for species, parameters, reactions and file names',
   '- `## headings` once an answer runs past a few paragraphs, and bullets over prose',
+  '',
+  'There is no LaTeX. `\\(…\\)`, `\\[…\\]` and `$$…$$` do not render as maths, and `$` is',
+  'Antimony\'s boundary-species marker, never a delimiter. Write an expression in',
+  'backticks instead: `` `C^J_1 = 0.24` ``, `` `dS1/dt = v1 - v2` ``.',
   '',
   'Write Markdown, not HTML. Do not wrap the answer in a ``` fence — a fence is for',
   'code you want shown as code, and fencing the whole answer stops it rendering.',
@@ -104,7 +113,8 @@ export function localSystem({ tools, liveModel = '', howToRun, extra = '' }) {
     liveModel.trim()
       ? '\n## The live model, right now\n\n```\n' + liveModel.trim() + '\n```'
       : '\n`workspace/model.txt` is EMPTY. If the user asks for a model, write one ' +
-        'yourself — do not ask them to supply one.',
+        'yourself with the write tool — do not ask them to supply one, and do not ' +
+        'answer with the Antimony in a code fence: that leaves the editor empty.',
     extra,
     '',
     TEXT_TOOL_PROTOCOL,

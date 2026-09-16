@@ -2,7 +2,8 @@ import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { join, resolve, relative, dirname } from 'node:path';
 import { execFile } from 'node:child_process';
 import { forHistory, toolRunner, toolResult, readCompletion, fitMessages, resultCap,
-         CONTEXT_DEFAULT, REPEAT_LIMIT, stripToolSyntax, missingArgs } from '../web/js/oai.mjs';
+         CONTEXT_DEFAULT, REPEAT_LIMIT, stripToolSyntax, missingArgs, replyTokens,
+         stepBudget } from '../web/js/oai.mjs';
 import { localSystem } from '../web/js/prompt.mjs';
 
 /* A second agent runtime for models that are not Claude Code: anything speaking
@@ -17,13 +18,15 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 
 /* ------------------------------- provider ------------------------------- */
 export class Chat {
-  constructor({ baseUrl, apiKey, model, contextTokens }) {
+  constructor({ baseUrl, apiKey, model, contextTokens, replyPct, resultPct, steps }) {
     this.url = String(baseUrl || '').replace(/\/+$/, '');
     if (!/\/v\d+$/.test(this.url)) this.url += '/v1';
     this.apiKey = apiKey; this.model = model;
     // What the runtime loaded the model with, not what the weights allow: LM
     // Studio and Ollama both default well below the maximum.
     this.ctx = Number(contextTokens) > 0 ? Number(contextTokens) : CONTEXT_DEFAULT;
+    // Settings -> Budget. Left unset each falls back to the shares in oai.mjs.
+    this.replyPct = replyPct; this.resultPct = resultPct; this.steps = steps;
   }
 
   /* Always streams. A slow local model can sit well past Node's 300s fetch
@@ -38,7 +41,7 @@ export class Chat {
      reply to the window the model was actually loaded with, and fit the prompt
      around that same number so both halves fit at once. */
   async complete({ messages, tools, schema, signal, onStream, maxTokens }) {
-    const cap = Math.max(256, Math.min(maxTokens ?? Infinity, this.ctx >> 1));
+    const cap = Math.max(256, Math.min(maxTokens ?? Infinity, replyTokens(this.ctx, this.replyPct)));
     const body = { model: this.model, messages: fitMessages(messages, this.ctx, cap),
                    max_tokens: cap, temperature: 0.2, stream: true };
     if (tools?.length) body.tools = tools;
@@ -282,13 +285,14 @@ function fill(obj, schema) {
 export async function runWorkflowFile({ root, chat, args, emit, signal, te, scratch }) {
   const src = await readFile(join(root, 'workflows/mca-tellurium.js'), 'utf8');
   const body = src.replace(/^\s*export\s+const\s+meta\s*=/m, 'const meta =');
-  const cap = resultCap(chat.ctx);
+  const cap = resultCap(chat.ctx, chat.resultPct);
   const system = localSystem({ tools: TOOL_NAMES, liveModel: args?.model ?? '', howToRun: HOW_TO_RUN });
   const tools = makeTools(root, emit, te, cap, scratch);
 
   const agent = async (prompt, opts = {}) => {
     emit({ type: 'phase', phase: opts.phase, label: opts.label });
-    return toolLoop({ chat, system, prompt, tools, schema: opts.schema, emit, signal, cap });
+    return toolLoop({ chat, system, prompt, tools, schema: opts.schema, emit, signal, cap,
+                      maxSteps: Math.max(2, stepBudget(chat.steps) - 2) });
   };
   const phase = title => emit({ type: 'phase', phase: title });
   const log = msg => emit({ type: 'log', text: String(msg) });
@@ -327,7 +331,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
     return { kill(){} };
   }
   const chat = new Chat(chatCfg);
-  const cap = resultCap(chat.ctx);
+  const cap = resultCap(chat.ctx, chat.resultPct);
   const tools = makeTools(root, emit, te, cap, scratch);
 
   (async () => {
@@ -375,7 +379,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
       const run = toolRunner(allTools.impl, WRITES);
       const lacks = missingArgs(allTools.defs);
       let final = '', usedTools = false, computed = false;
-      const STEPS = 14;
+      const STEPS = stepBudget(chat.steps);
       for (let step = 0; step < STEPS; step++) {
         if (ctrl.signal.aborted) break;
         // ...or as soon as it is plainly stuck: a repeated call warned about twice

@@ -93,6 +93,32 @@ function sanitize(src, TAG_OK, ATTR_OK, balance = true) {
 export const sanitizeSvg  = src => sanitize(src, TAG_OK, ATTR_OK);
 export const sanitizeHtml = src => sanitize(src, HTAG_OK, HATTR_OK);
 
+/* ---------------------------------- tex ---------------------------------- */
+/* Nothing here renders maths, and a model reaches for \( \) and \frac the moment it
+   writes an equation, so the delimiters and the handful of commands that actually
+   turn up become plain text in backticks — backticks because the stripped form is
+   full of `_` and `^`, which markdown would otherwise read as emphasis.
+   `$…$` is deliberately left alone: in Antimony `$X0` is a boundary species. */
+const TEX = [
+  [/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, '($1)/($2)'],
+  [/\\(?:text|mathrm|mathbf|operatorname)\s*\{([^{}]*)\}/g, '$1'],
+  [/\\(?:left|right|big|Big|displaystyle)\b/g, ''],
+  [/\\cdot\b/g, '\u00b7'], [/\\times\b/g, '\u00d7'], [/\\approx\b/g, '\u2248'],
+  [/\\(?:leq|le)\b/g, '\u2264'], [/\\(?:geq|ge)\b/g, '\u2265'],
+  [/\\(?:to|rightarrow)\b/g, '\u2192'],
+  [/\\[,;:!]/g, ' '],
+  [/\\([A-Za-z]+)/g, '$1'],          // any command left: keep the word, drop the slash
+  [/[{}`]/g, ''],                     // C^J_{1} -> C^J_1; a backtick would break the span
+];
+const MATH = /\\\(([\s\S]*?)\\\)|\\\[([\s\S]*?)\\\]|\$\$([\s\S]*?)\$\$/g;
+
+export function detex(src) {
+  return String(src ?? '').replace(MATH, (m, a, b, c) => {
+    const t = TEX.reduce((s, [re, to]) => s.replace(re, to), a ?? b ?? c).trim();
+    return t ? '`' + t + '`' : '';
+  });
+}
+
 /* --------------------------------- inline --------------------------------- */
 
 const LINK_OK = /^(?:https?:|mailto:)/i;
@@ -173,6 +199,8 @@ export function renderMarkdown(src) {
   s = s.replace(/```(\w*)\n?([\s\S]*?)(?:```|$)/g, (_, lang, code) =>
     hold('<pre><code' + (lang ? ' class="lang-' + esc(lang) + '"' : '') + '>' +
          esc(code.replace(/\n$/, '')) + '</code></pre>'));
+
+  s = detex(s);            // after the fences: TeX inside a code block stays literal
 
   s = s.replace(/<svg[\s\S]*?(?:<\/svg\s*>|$)/gi, m =>
     hold('<figure class="md-svg">' + sanitizeSvg(m) + '</figure>'));

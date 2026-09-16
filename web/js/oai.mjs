@@ -355,10 +355,31 @@ export async function readCompletion(res, { onStream, toolNames = [] } = {}) {
 export const CONTEXT_DEFAULT = 8192;
 const CHARS_PER_TOKEN = 3.5;
 
-/** Chars a single tool result may add. A quarter of the window, so a transcript
-    survives several of them; 40000 chars was ~3x the whole window. */
-export const resultCap = (ctx = CONTEXT_DEFAULT) =>
-  Math.max(1500, Math.round((ctx * CHARS_PER_TOKEN) / 4));
+/* How the window is divided, as shares of it rather than absolute token counts:
+   one setting then means the same thing on an 8k model and a 128k one. These
+   defaults are exactly what the code used to hardcode — half the window for the
+   reply, a quarter for a single tool result — so leaving them alone changes
+   nothing. Settings → Budget moves them. */
+export const BUDGET = { replyPct: 50, resultPct: 25, steps: 14 };
+export const BUDGET_LIMITS = { replyPct: [10, 90], resultPct: [5, 60], steps: [2, 40] };
+
+const share = (v, k) => {
+  const [lo, hi] = BUDGET_LIMITS[k];
+  const n = Number(v);
+  return n > 0 ? Math.min(hi, Math.max(lo, n)) : BUDGET[k];
+};
+
+/** Tokens the model may spend on one reply — thinking and answer together. */
+export const replyTokens = (ctx = CONTEXT_DEFAULT, replyPct) =>
+  Math.max(256, Math.round(ctx * share(replyPct, 'replyPct') / 100));
+
+/** Chars a single tool result may add. A quarter of the window by default, so a
+    transcript survives several of them; 40000 chars was ~3x the whole window. */
+export const resultCap = (ctx = CONTEXT_DEFAULT, resultPct) =>
+  Math.max(1500, Math.round(ctx * CHARS_PER_TOKEN * share(resultPct, 'resultPct') / 100));
+
+/** Tool steps a turn gets before it is made to answer with what it has. */
+export const stepBudget = steps => Math.round(share(steps, 'steps'));
 
 export const estTokens = messages =>
   Math.ceil(messages.reduce((n, m) =>

@@ -178,6 +178,31 @@ console.log('ok');
   assert.deepEqual(JSON.parse(r[0].function.arguments), { code: 'print(1)' });
 }
 
+/* ------------------------------- the budget ------------------------------- */
+/* Settings -> Budget moves these. The defaults must reproduce exactly what the
+   code hardcoded before there was a setting, or every existing install changes
+   behaviour the moment it updates. */
+{
+  const { replyTokens, resultCap, stepBudget, BUDGET } = await import('./oai.mjs');
+  for (const ctx of [2048, 8192, 32768]) {
+    assert.equal(replyTokens(ctx), ctx >> 1, 'default reply share is half the window');
+    assert.equal(resultCap(ctx), Math.max(1500, Math.round(ctx * 3.5 / 4)),
+      'default result cap is a quarter of the window');
+  }
+  assert.equal(stepBudget(), BUDGET.steps, 'default step budget');
+  // a share is a share: the same setting means the same thing at any window size
+  assert.equal(replyTokens(8192, 25), 2048, 'reply share applied');
+  assert.equal(replyTokens(32768, 25), 8192, 'the same share on a bigger window');
+  // out-of-range settings are clamped, never sent to a server as nonsense
+  assert.equal(replyTokens(8192, 500), replyTokens(8192, 90), 'reply share clamped high');
+  assert.equal(replyTokens(8192, 1), replyTokens(8192, 10), 'reply share clamped low');
+  assert.equal(stepBudget(9999), 40, 'steps clamped high');
+  assert.equal(stepBudget(0), BUDGET.steps, 'zero means "unset", not "no steps"');
+  // a reply may never be so small the model cannot answer at all
+  assert.ok(replyTokens(512, 10) >= 256, 'reply floor holds on a tiny window');
+  console.log('budget ok');
+}
+
 console.log('oai.test.mjs ok');
 
 /* ---------------- streaming + context budget ---------------- */

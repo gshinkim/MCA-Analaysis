@@ -109,4 +109,17 @@ for (const junk of ['<svg', '<svg><circle', '</svg>', '<<>>', '<svg><g><g></svg>
 lacks('\uE000 0 \uE000 ping', 'ping</pre>', 'a typed sentinel cannot forge a placeholder');
 console.log('malformed input ok');
 
+/* ------------------------------------ tex ------------------------------------ */
+/* Nothing renders maths, so TeX a model wrote anyway must arrive as readable text
+   rather than as backslashes. */
+has('coefficient \\( C^J_{1} = 0.24 \\) is largest', '<code>C^J_1 = 0.24</code>', 'inline \\(…\\)');
+has('$$ \\frac{dS_1}{dt} = v_1 - v_2 $$', '<code>(dS_1)/(dt) = v_1 - v_2</code>', 'display $$…$$');
+has('\\[ J = k_1 \\cdot X_0 \\]', '<code>J = k_1 \u00b7 X_0</code>', 'display \\[…\\]');
+lacks('\\( x \\)', '\\(', 'no delimiter survives');
+// `$X0` is Antimony's boundary-species marker, not maths
+has('$X0 -> S1 and $X5 are fixed', '$X0', 'a single $ is left alone');
+// and TeX shown as code was meant to be shown
+has('```\n\\( keep \\)\n```', '\\( keep \\)', 'tex inside a fence stays literal');
+console.log('tex ok');
+
 console.log('md.test.mjs ok');

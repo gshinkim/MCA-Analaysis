@@ -3,6 +3,8 @@ import { S } from './state.mjs';
 import * as api from './api.mjs';
 import { pickFile } from './filepicker.mjs';
 import { probe as probeLocal, permissionState } from './localai.mjs';
+import { BUDGET, BUDGET_LIMITS, CONTEXT_DEFAULT, replyTokens, resultCap,
+         stepBudget } from './oai.mjs';
 
 /* Two agent runtimes:
    - claude-code : spawns the Claude Code CLI; real Skill/Workflow tools.
@@ -15,7 +17,7 @@ const BUILTIN = [
   { id:'sonnet', t:'Claude Sonnet 5' },
   { id:'haiku',  t:'Claude Haiku 4.5' },
 ];
-const DEF = { endpoints: [], useWorkflow: true, scratchDir: '', localCfg:{
+const DEF = { endpoints: [], useWorkflow: true, scratchDir: '', budget: { ...BUDGET }, localCfg:{
   olUrl:'http://localhost:11434', lmUrl:'http://localhost:1234', ggufPath:'', ggufUrl:'http://localhost:8080' } };
 
 /* Every local server the settings pane can hold. This used to be a radio group, so
@@ -32,6 +34,7 @@ const LOCAL = [
 ];
 
 export const settings = () => ({ ...DEF, ...store.get('settings', {}),
+                                 budget:   { ...BUDGET,        ...(store.get('settings',{}).budget||{}) },
                                  localCfg: { ...DEF.localCfg, ...(store.get('settings',{}).localCfg||{}) } });
 
 let draft = null;
@@ -51,17 +54,18 @@ export function resolveModel(sel){
   // 'auto:<baseUrl>|<model>' — a runtime found by /api/local/scan, nothing saved
   if(kind==='auto'){
     const i = model.lastIndexOf('|');
-    return { runtime:'openai', chatCfg:{ baseUrl: model.slice(0,i), model: model.slice(i+1) } };
+    return { runtime:'openai', chatCfg:{ baseUrl: model.slice(0,i), model: model.slice(i+1),
+                                         ...s.budget } };
   }
   const L = LOCAL.find(l => l.id === kind);
   if(L) return { runtime:'openai', chatCfg:{
     baseUrl: s.localCfg[L.url], model: model || 'local',
-    contextTokens: +s.localCfg[L.ctx] || undefined } };
+    contextTokens: +s.localCfg[L.ctx] || undefined, ...s.budget } };
   if(kind==='ep'){
     const i = +model.split('|')[0], name = model.split('|').slice(1).join('|');
     const ep = s.endpoints[i];
     return ep ? { runtime:'openai', chatCfg:{ baseUrl: ep.base, apiKey: ep.key, model: name,
-                                              contextTokens: +ep.ctx || undefined } }
+                                              contextTokens: +ep.ctx || undefined, ...s.budget } }
               : { runtime:'claude-code', model:'opus' };
   }
   return { runtime:'claude-code', model:'opus' };
@@ -245,8 +249,10 @@ function renderLocal(){
     const ms=field(box,'Models (comma-sep)',L.models,'filled in by Connect');
     // The one number that decides whether a local model can work at all: the window
     // the runtime loaded it with, which is usually far below what the weights allow.
-    const cx=field(box,'Context window (tokens)',L.ctx,'8192 if unsure','number');
-    cx.min='512';
+    slider(box, { label:'Context window (tokens)', range:[512, 131072], log:true, snap:256,
+      get:()=>+cfg[L.ctx] || CONTEXT_DEFAULT, set:v=>{ cfg[L.ctx]=v; },
+      note:v=>'What '+L.label+' loaded the model with \u2014 not what the weights allow. '+
+              'The system prompt plus one tool result has to fit inside it.' });
     row.querySelector('button').onclick=async()=>{
       const m=await probe(url.value,'',out);
       if(m?.length){ cfg[L.models]=m.join(', '); ms.value=cfg[L.models]; } };
@@ -261,10 +267,101 @@ function renderLocal(){
   c.append(note);
 }
 
+/* ---- sliders ---- */
+/* One labelled slider: a range and a number box that drive the same value. Both
+   write on `input`, never on `change`, so the readout under the control follows
+   the thumb while it is being dragged rather than jumping when it is released.
+   `log` is for the context window — on a linear track from 512 to 131072 every
+   size anyone actually loads sits in the first centimetre. */
+const budgetNotes = [];
+
+function slider(parent, o){
+  const d=document.createElement('div'); d.className='krow';
+  d.innerHTML='<div class="top"><span class="nm"></span><input type="number"></div>'+
+              '<input type="range"><p class="hint" style="margin:3px 0 0"></p>';
+  d.querySelector('.nm').textContent=o.label;
+  const num=d.querySelector('input[type=number]'), rng=d.querySelector('input[type=range]'),
+        note=d.querySelector('.hint');
+  const [lo,hi]=o.range, step=o.step||1, snap=o.snap||1;
+  const toR   = v => o.log ? Math.round(1000*Math.log(v/lo)/Math.log(hi/lo)) : v;
+  const fromR = r => o.log ? Math.round(lo*Math.pow(hi/lo, r/1000)/snap)*snap : +r;
+  const clamp = v => Math.min(hi, Math.max(lo, Math.round(v/step)*step));
+  num.min=lo; num.max=hi; num.step=step;
+  rng.min=o.log?0:lo; rng.max=o.log?1000:hi; rng.step=o.log?1:step;
+  num.setAttribute('aria-label',o.label); rng.setAttribute('aria-label',o.label+' slider');
+  const show = () => { note.textContent = o.note ? o.note(clamp(o.get())) : ''; };
+  const set = (v, dragging) => {
+    v=clamp(v); o.set(v); num.value=v; if(!dragging) rng.value=toR(v);
+    show(); budgetNotes.forEach(f=>f());
+  };
+  rng.value=toR(clamp(o.get())); num.value=clamp(o.get()); show();
+  rng.oninput=()=>set(fromR(+rng.value), true);
+  num.oninput=()=>{ if(num.value!=='' && isFinite(+num.value)) set(+num.value); };
+  parent.append(d);
+  return show;
+}
+
+/* The window of whichever model is selected right now, read from the unsaved
+   draft so the token counts below the sliders track the context slider live. */
+function draftCtx(){
+  const sel = String(store.get('modelSel','') || '');
+  const [kind, ...rest] = sel.split(':');
+  const L = LOCAL.find(l => l.id === kind);
+  if(L) return +draft.localCfg[L.ctx] || CONTEXT_DEFAULT;
+  if(kind === 'ep') return +draft.endpoints[+rest.join(':').split('|')[0]]?.ctx || CONTEXT_DEFAULT;
+  /* Nothing local is selected — a Claude model, or nothing yet. Size the numbers
+     against the biggest window configured instead of the default, so dragging the
+     context slider in the other tab is visibly connected to these. */
+  const all = [...LOCAL.map(L => +draft.localCfg[L.ctx]), ...draft.endpoints.map(e => +e.ctx)]
+    .filter(v => v > 0);
+  return all.length ? Math.max(...all) : CONTEXT_DEFAULT;
+}
+
+const n = v => Math.round(v).toLocaleString();
+
+/* ---- budget tab ---- */
+function renderBudget(){
+  const c=$('#budgetBox'); c.textContent='';
+  budgetNotes.length=0;
+  const b=draft.budget;
+
+  budgetNotes.push(slider(c, {
+    label:'Reply length', range:BUDGET_LIMITS.replyPct,
+    get:()=>b.replyPct, set:v=>{ b.replyPct=v; },
+    note:v=>'\u2248'+n(replyTokens(draftCtx(), v))+' tokens of '+n(draftCtx())+
+            ' for thinking and answer together \u2014 the rest holds the prompt and the '+
+            'transcript. '+v+'% of the window (default '+BUDGET.replyPct+'%).' }));
+
+  budgetNotes.push(slider(c, {
+    label:'Tool result cap', range:BUDGET_LIMITS.resultPct,
+    get:()=>b.resultPct, set:v=>{ b.resultPct=v; },
+    note:v=>n(resultCap(draftCtx(), v))+' characters of any one tool result reach the model; '+
+            'the rest is cut. '+v+'% of the window (default '+BUDGET.resultPct+'%).' }));
+
+  budgetNotes.push(slider(c, {
+    label:'Tool steps', range:BUDGET_LIMITS.steps,
+    get:()=>b.steps, set:v=>{ b.steps=v; },
+    note:v=>stepBudget(v)+' tool calls before the agent is made to answer with what it has; '+
+            'a workflow stage gets '+Math.max(2, stepBudget(v)-2)+'. Default '+BUDGET.steps+'.' }));
+
+  const note=document.createElement('p'); note.className='hint';
+  const against=document.createElement('p'); against.className='hint';
+  against.style.margin='0 0 10px';
+  budgetNotes.push(()=>{ against.innerHTML='Sized against a <b>'+n(draftCtx())+
+    '</b>-token window.'; });
+  budgetNotes.at(-1)();
+  c.prepend(against);
+  note.innerHTML='Shares of the context window, not fixed token counts, so one setting means '+
+    'the same thing on an 8k model and a 128k one. Reply length and the result cap come out of '+
+    'the same window: raise one and the transcript is trimmed sooner. The window itself is per '+
+    'server \u2014 <b>Local models</b> tab.';
+  c.append(note);
+}
+
 /* ---- drawer ---- */
 export function openSettings(){
   draft = structuredClone(settings());
-  renderEndpoints(); renderLocal(); renderEnv(); renderFound(); renderScratch();
+  renderEndpoints(); renderLocal(); renderBudget(); renderEnv(); renderFound(); renderScratch();
   $('#wfToggle').checked = draft.useWorkflow !== false;
   $('#wfToggle').onchange = e => { draft.useWorkflow = e.target.checked; };
   $('#settings').classList.add('on'); $('#scrim').classList.add('on');

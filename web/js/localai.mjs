@@ -1,4 +1,4 @@
-import { readCompletion, fitMessages, CONTEXT_DEFAULT } from './oai.mjs';
+import { readCompletion, fitMessages, CONTEXT_DEFAULT, replyTokens } from './oai.mjs';
 
 /* Reaching a model server on the user's own machine from a hosted https page.
    Chrome 141+ gates this behind the Local Network Access permission, which only
@@ -85,7 +85,7 @@ export async function probe(baseUrl){
 
 /** Chat completions against the user's own machine, streamed. */
 export async function localChat({ baseUrl, apiKey, model, messages, tools, schema, signal,
-                                  onStream, contextTokens }){
+                                  onStream, contextTokens, replyPct }){
   const base = baseUrl.replace(/\/+$/,'');
   const url = (/\/v\d+$/.test(base) ? base : base + '/v1') + '/chat/completions';
   // Sized to the window the runtime actually loaded, not to the weights' maximum:
@@ -93,7 +93,7 @@ export async function localChat({ baseUrl, apiKey, model, messages, tools, schem
   // answer, and that truncation is what made the model repeat itself.
   const ctx = Number(contextTokens) > 0 ? Number(contextTokens) : CONTEXT_DEFAULT;
   const body = { model, messages: fitMessages(messages, ctx), stream: true,
-                 max_tokens: Math.max(256, ctx >> 1), temperature: 0.2 };
+                 max_tokens: replyTokens(ctx, replyPct), temperature: 0.2 };
   if (tools?.length) body.tools = tools;
   else body.tool_choice = 'none';          // a server that honours it cannot emit a call
   if (schema) body.response_format = { type:'json_schema',

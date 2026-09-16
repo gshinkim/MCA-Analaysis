@@ -1,6 +1,6 @@
 import { localChat } from './localai.mjs';
 import { forHistory, toolRunner, toolResult, resultCap, CONTEXT_DEFAULT,
-         REPEAT_LIMIT, stripToolSyntax, missingArgs } from './oai.mjs';
+         REPEAT_LIMIT, stripToolSyntax, missingArgs, stepBudget } from './oai.mjs';
 import { localSystem } from './prompt.mjs';
 import * as api from './api.mjs';
 
@@ -190,7 +190,8 @@ export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel,
   (async () => {
     try {
       const tk = tools(getModel, setModel, emit);
-      const cap = resultCap(cfg?.contextTokens);
+      const cap = resultCap(cfg?.contextTokens, cfg?.resultPct);
+      const STEPS = stepBudget(cfg?.steps);
       const base = localSystem({ tools: TOOL_NAMES, liveModel: await getModel(),
                                  howToRun: HOW_TO_RUN });
 
@@ -202,7 +203,7 @@ export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel,
         const agent = async (p, opts = {}) => {
           emit({ type:'phase', phase: opts.phase, label: opts.label });
           return loop({ chat, system: base, prompt: p, tk, schema: opts.schema, emit,
-                        signal: ctrl.signal, cap,
+                        signal: ctrl.signal, cap, maxSteps: Math.max(2, STEPS - 2),
                         stream: ev => { if (ev.type === 'thinking') emit(ev); } });
         };
         const out = await new AsyncFunction('agent','phase','log','args', body)(
@@ -234,7 +235,6 @@ export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel,
       const run = toolRunner(all.impl, WRITES);
       const lacks = missingArgs(all.defs);
       let final = '', usedTools = false, computed = false;
-      const STEPS = 14;
       for (let i = 0; i < STEPS; i++){
         if (ctrl.signal.aborted) break;
         const stuck = run.repeats >= REPEAT_LIMIT;
