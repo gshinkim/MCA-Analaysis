@@ -84,6 +84,13 @@ header{grid-column:1/-1;display:flex;align-items:center;gap:12px;padding:0 14px;
 .brand{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:620;letter-spacing:-.01em}
 .brand svg{display:block}
 .crumb{color:var(--muted);font-size:13px;padding-left:12px;margin-left:2px;border-left:1px solid var(--border)}
+/* editable, but only advertises it on approach — a permanently boxed title reads
+   as a form field in what is otherwise a breadcrumb */
+.crumb[contenteditable]{outline:none;border-radius:5px;padding:2px 5px 2px 12px;
+  min-width:3ch;cursor:text;white-space:nowrap;caret-color:var(--accent)}
+.crumb[contenteditable]:hover{background:var(--hover,rgba(128,128,128,.12))}
+.crumb[contenteditable]:focus{background:var(--bg);color:var(--ink);
+  box-shadow:0 0 0 2px var(--accent)}
 .spacer{flex:1}
 .stat{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--ink-2);
       font-variant-numeric:tabular-nums}
@@ -276,6 +283,34 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .envrow b{font-weight:560;font-size:13px}
 .envrow .hint{font-size:12px;overflow-wrap:anywhere}
 #chat .txt{white-space:pre-wrap;overflow-wrap:anywhere}
+/* once a turn ends the text is real markup, and pre-wrap would double every gap
+   the block elements already provide */
+#chat .txt:has(p,h1,h2,h3,ul,ol,table,pre,blockquote){white-space:normal}
+#chat .txt>:first-child{margin-top:0}
+#chat .txt>:last-child{margin-bottom:0}
+#chat .txt p{margin:0 0 .6em}
+#chat .txt h1,#chat .txt h2,#chat .txt h3,#chat .txt h4{margin:.9em 0 .4em;line-height:1.25}
+#chat .txt h1{font-size:1.25em}
+#chat .txt h2{font-size:1.15em}
+#chat .txt h3{font-size:1.05em}
+#chat .txt ul,#chat .txt ol{margin:.3em 0 .7em;padding-left:1.3em}
+#chat .txt li{margin:.15em 0}
+#chat .txt blockquote{margin:.5em 0;padding:.1em 0 .1em .8em;
+  border-left:2px solid var(--border);color:var(--ink-2)}
+#chat .txt pre{margin:.5em 0;padding:9px 11px;background:var(--bg);border:1px solid var(--border);
+  border-radius:8px;overflow-x:auto}
+#chat .txt pre code{background:none;padding:0;font-size:12px;line-height:1.5}
+#chat .txt table{border-collapse:collapse;margin:.5em 0;font-size:12.5px;display:block;overflow-x:auto}
+#chat .txt th,#chat .txt td{border:1px solid var(--border);padding:4px 9px;text-align:left}
+#chat .txt th{background:var(--hover);font-weight:600}
+#chat .txt mark{background:var(--warn-bg,rgba(255,210,0,.32));color:inherit;
+  padding:0 3px;border-radius:3px}
+#chat .txt hr{border:0;border-top:1px solid var(--border);margin:.8em 0}
+#chat .txt a{color:var(--accent)}
+/* a diagram should scale to the panel, never force it to scroll sideways */
+.md-svg{margin:.6em 0;text-align:center}
+.md-svg svg{max-width:100%;height:auto}
+.stat-line:empty{display:none}
 #chat .meta{margin-top:7px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
 .thinking{color:var(--muted)}
 .thinking::after{content:'';animation:dots 1.2s steps(4,end) infinite}

@@ -1,10 +1,10 @@
-import { $, $$, store, fmt, flash } from './util.mjs';
+import { $, $$, store, fmt, flash, coalesce } from './util.mjs';
 import { S } from './state.mjs';
 import * as api from './api.mjs';
 import { draw, initChartInteractions } from './chart.mjs';
 import { renderControls, initAccordions, setOnChange } from './panel.mjs';
 import { initSettings, fillModels, closeSettings, refreshEnv, refreshLocal } from './settings.mjs';
-import { initChat, toggleChat, setOnModelChanged } from './chat.mjs';
+import { initChat, toggleChat, setOnModelChanged, offerScratchSetup } from './chat.mjs';
 import { initExport, initImport } from './export.mjs';
 
 const editor = $('#model');
@@ -87,16 +87,41 @@ async function run(){
   draw();
 }
 
-/* Coalesce a drag's worth of input, and back off once runs get slow (Doherty). */
+/* Coalesce a drag's worth of input, and back off once runs get slow (Doherty).
+   A pure trailing debounce starves: every oninput cleared the timer, so a slider
+   held down never committed until the user let go — which is exactly why the plot
+   looked like it only updated on release. `oldest` caps that wait, so a continuous
+   drag still re-simulates at a steady rate. */
 let commitT;
 async function commit(){
+  clearTimeout(commitT);
   await api.putModel(editor.value);
   api.putSettings(cfg());
   run();
 }
-const commitSoon = () => { clearTimeout(commitT);
-  commitT = setTimeout(commit, S.lastRunMs > 150 ? 200 : 30); };
+const commitSoon = coalesce(commit, () => {
+  const wait = S.lastRunMs > 150 ? 200 : 30;
+  // never hold a frame back for longer than the run itself costs
+  return { wait, max: Math.max(wait, Math.min(S.lastRunMs * 1.5, 300)) };
+});
 setOnChange(commitSoon);
+
+/* ---------------- project name ----------------
+   Click the breadcrumb and type. Read back as textContent everywhere, so a paste
+   that smuggles markup can only ever be text. */
+const proj = $('#projName');
+const PROJ_DEF = 'Untitled project';
+const projName = () => proj.textContent.replace(/\s+/g,' ').trim() || PROJ_DEF;
+function setProjName(n, save = true){
+  proj.textContent = n || PROJ_DEF;
+  if(save) store.set('projName', projName());
+}
+setProjName(store.get('projName', PROJ_DEF), false);
+proj.addEventListener('keydown', e=>{
+  if(e.key==='Enter'){ e.preventDefault(); proj.blur(); }
+  if(e.key==='Escape'){ setProjName(store.get('projName', PROJ_DEF), false); proj.blur(); }
+});
+proj.addEventListener('blur', ()=> setProjName(projName()));
 
 /* ---------------- default config: captured once, replaced only on request ---------------- */
 const snapshot = () => ({ src: editor.value, ...cfg() });
@@ -206,7 +231,7 @@ setOnModelChanged(src=>{ editor.value = src; run(); });
   initAccordions(); initSettings(); initChartInteractions(); initChat(); initExport();
   initImport((text, name) => {                 // loading a file replaces the live model
     editor.value = text;
-    document.querySelector('.crumb').textContent = name.replace(/\.(ant|txt|antimony)$/i,'');
+    setProjName(name.replace(/\.(ant|txt|antimony)$/i,''));
     S.view = null; commit();
   });
   fillModels();
@@ -223,7 +248,7 @@ setOnModelChanged(src=>{ editor.value = src; run(); });
   api.getEnv().then(e=>{
     // the picker is built before this resolves, and on a hosted deployment the
     // built-in Claude models must drop out of it
-    S.env = e; refreshEnv(); fillModels();
+    S.env = e; refreshEnv(); fillModels(); offerScratchSetup();
     if(!e.telluriumInstalled) status('err','Tellurium not installed — run: bash setup.sh');
     if(e.claude.error) $('#aiBar').title = e.claude.error;
   });

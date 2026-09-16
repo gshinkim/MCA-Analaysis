@@ -52,13 +52,28 @@ export function downloadPNG(scale = 2){
   img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
 }
 
+/* A typed project name goes straight into a filename, so strip anything a
+   filesystem or a Content-Disposition would argue about. */
+const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g,'').replace(/\s+/g,'-')
+                           .replace(/^[.\-]+|[.\-]+$/g,'').slice(0,80);
+
 /** The Antimony source itself — the thing Tellurium actually loads. */
 export function downloadAntimony(){
   const src = document.querySelector('#model').value;
-  // name it after the model, not the clock, so a folder of these stays readable
-  const named = src.match(/^\s*model\s+\*?\s*([A-Za-z_]\w*)/m)?.[1];
+  // the name the user typed wins; otherwise fall back to the model's own id, and
+  // only then the clock — a folder of these should stay readable
+  const typed = slug(document.querySelector('#projName')?.textContent ?? '');
+  const named = (typed && typed !== 'Untitled-project' ? typed : '')
+             || src.match(/^\s*model\s+\*?\s*([A-Za-z_]\w*)/m)?.[1];
   save(new Blob([src.endsWith('\n') ? src : src+'\n'], {type:'text/plain'}),
        (named || 'model-' + stamp()) + '.ant');
+}
+
+/** The conversation as Markdown — the same source the chat bubbles rendered from,
+    so bold, tables and any SVG the agent drew survive the trip to a file. */
+export function downloadChat(title, md){
+  save(new Blob([md], {type:'text/markdown;charset=utf-8'}),
+       (slug(title) || 'chat') + '-chat-' + stamp() + '.md');
 }
 
 export function downloadCSV(){

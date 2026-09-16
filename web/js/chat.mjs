@@ -1,8 +1,10 @@
-import { $, store } from './util.mjs';
+import { $, store, flash } from './util.mjs';
 import { S } from './state.mjs';
 import * as api from './api.mjs';
-import { resolveModel, useWorkflow } from './settings.mjs';
+import { resolveModel, useWorkflow, scratchDir, openSettings } from './settings.mjs';
 import { runBrowserAgent } from './agent.mjs';
+import { renderMarkdown } from './md.mjs';
+import { downloadChat } from './export.mjs';
 
 const SUGGEST = [
   'Explain what this model does',
@@ -27,7 +29,7 @@ function makeChat(){
   const thread = document.createElement('div');
   thread.className = 'thread';
   $('#msgs').append(thread);
-  const c = { id: ++seq, title: 'New chat', thread, history: [], sessionId: null };
+  const c = { id: ++seq, title: 'New chat', thread, history: [], sessionId: null, log: [] };
   chats.push(c);
   show(c.id);
   bubble('ai','I read and edit the model in the editor, run Tellurium, and route every '+
@@ -102,6 +104,9 @@ function send(){
   const tkTime = think.querySelector('.tk-time');
 
   const text = document.createElement('div'); text.className='txt'; wrap.append(text);
+  // its own line: status used to be written into `text`, so one 'log' event
+  // mid-stream erased everything the model had already said
+  const stat = document.createElement('div'); stat.className='stat-line'; wrap.append(stat);
   const seen = new Set(), chips = new Map();
   const started = Date.now();
   let body = '', lastPhase = '', thoughts = '', failed = false, logged = false;
@@ -123,7 +128,8 @@ function send(){
     chips.set(label, { el:c, n:1 });
     seen.add(label);
   };
-  const status = t => { text.innerHTML = '<span class="thinking">'+t+'</span>'; };
+  const status = t => { stat.innerHTML = '<span class="thinking">'+esc(t)+'</span>'; };
+  const clearStatus = () => { stat.textContent=''; };
   status(useWorkflow() ? 'Starting the model-scientist agent…'
                        : 'Starting the model-scientist agent (workflow off)…');
 
@@ -177,10 +183,13 @@ function send(){
         if(think.open) $('#msgs').scrollTop=1e9;
         return;
       }
-      if(ev.type==='delta'){ body += ev.text; text.textContent = body; $('#msgs').scrollTop=1e9; return; }
+      if(ev.type==='delta'){ body += ev.text; text.textContent = body; clearStatus();
+                             $('#msgs').scrollTop=1e9; return; }
       if(ev.type==='result'){
         if(ev.text) body = ev.text;
-        text.textContent = body || '(no answer returned)';
+        clearStatus();
+        if(body) text.innerHTML = renderMarkdown(body);
+        else text.textContent = '(no answer returned)';
         if(thoughts){
           const secs = Math.max(1, Math.round((Date.now()-started)/1000));
           tkLabel.textContent = 'Thought for '+(secs>=60 ? Math.floor(secs/60)+'m '+(secs%60)+'s' : secs+'s');
@@ -209,8 +218,11 @@ function send(){
         failed = true; text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
       if(ev.type==='done' || ev.type==='closed'){
         // 'done' (agent) and 'closed' (stream end) both arrive on the server path
+        clearStatus();
+        if(body && !text.innerHTML.trim()) text.innerHTML = renderMarkdown(body);
         if(!logged){
           logged = true;
+          c.log.push({ q: v, a: body, tools: [...seen].filter(x => !x.startsWith('phase:')) });
           const acts = [...seen].filter(x => !x.startsWith('phase:'));
           c.history.push({ role:'user', content: v });
           c.history.push({ role:'assistant', content: (body || '(no answer)') +
@@ -244,11 +256,44 @@ function send(){
     abort = () => a.kill();
   } else {
     abort = api.chat({ message: v, sessionId: c.sessionId, history: c.history,
-                       ...rt, useWorkflow: useWorkflow() }, handle);
+                       ...rt, scratchDir: scratchDir(), useWorkflow: useWorkflow() }, handle);
   }
 }
 
+/* The log is the markdown the model actually sent, not a scrape of the rendered
+   DOM: what gets saved is the source, so it re-renders anywhere. */
+function exportChat(){
+  const c = cur();
+  if(!c?.log.length) return flash($('#chatSave'), '—');
+  const proj = document.querySelector('#projName')?.textContent.trim() || 'MCA Atlas';
+  const out = ['# ' + proj + ' — ' + c.title, '', '*' + new Date().toLocaleString() + '*', ''];
+  for(const t of c.log){
+    out.push('## ' + t.q, '', t.a || '*(no answer)*', '');
+    if(t.tools.length) out.push('`tools: ' + t.tools.join(', ') + '`', '');
+  }
+  downloadChat(proj, out.join('\n'));
+}
+
+/* Asked once, on a local install, before the AI has written anything anywhere.
+   Declining is a real answer: the default folder inside the app works fine. */
+export function offerScratchSetup(){
+  if(S.env?.hosted || scratchDir() || store.get('scratchAsked', false)) return;
+  const d = bubble('ai', 'Before I run anything \u2014 where should I keep my work? '+
+    'Every script, table and result I produce goes in one folder of your choosing, '+
+    'so it lands with your other files instead of inside the app.');
+  const row = document.createElement('div');
+  row.className = 'tools'; row.style.marginTop = '8px';
+  const pick = document.createElement('button');
+  pick.className = 'btn sm primary'; pick.textContent = 'Choose a folder\u2026';
+  pick.onclick = () => { store.set('scratchAsked', true); row.remove(); openSettings(); };
+  const skip = document.createElement('button');
+  skip.className = 'btn sm ghost'; skip.textContent = 'Use the default';
+  skip.onclick = () => { store.set('scratchAsked', true); row.remove(); };
+  row.append(pick, skip); d.append(row);
+}
+
 export function initChat(){
+  $('#chatSave').onclick = exportChat;
   $('#aiBtn').onclick   = ()=>toggleChat();
   $('#chatRail').onclick= ()=>toggleChat(true);
   $('#chatClose').onclick=()=>toggleChat(false);

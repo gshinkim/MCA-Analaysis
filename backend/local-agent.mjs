@@ -31,20 +31,41 @@ export class Chat {
      "network error"; streaming returns headers immediately and then keeps the
      body flowing, so the connection never idles out. It also lets thinking and
      tokens reach the UI as they are produced. */
-  // A 27B reasoning model routinely spends more than 4k tokens thinking; capping
-  // there truncated the answer mid-tool-call, which reads as "it cannot call tools".
+  /* max_tokens bounds the thinking block and the visible answer together. Pinned
+     at a flat 4096 a reasoning model spent the whole of it thinking and came back
+     finish_reason "length" with nothing to show — and raising the context setting
+     could not help, because 4096 was the binding term, not the window. Size the
+     reply to the window the model was actually loaded with, and fit the prompt
+     around that same number so both halves fit at once. */
   async complete({ messages, tools, schema, signal, onStream, maxTokens }) {
-    // Asking for more than the window holds is not a bigger answer, it is a
-    // truncated prompt. Leave room for the reply inside the same budget.
-    const fitted = fitMessages(messages, this.ctx);
-    const cap = Math.max(256, Math.min(maxTokens ?? 4096, this.ctx >> 1));
-    const body = { model: this.model, messages: fitted, max_tokens: cap,
-                   temperature: 0.2, stream: true };
+    const cap = Math.max(256, Math.min(maxTokens ?? Infinity, this.ctx >> 1));
+    const body = { model: this.model, messages: fitMessages(messages, this.ctx, cap),
+                   max_tokens: cap, temperature: 0.2, stream: true };
     if (tools?.length) body.tools = tools;
     else body.tool_choice = 'none';        // a server that honours it cannot emit a call
     if (schema) body.response_format = {
       type: 'json_schema', json_schema: { name: 'result', strict: true, schema } };
 
+    const msg = await this.send(body, { signal, onStream, tools });
+    if (msg.finish !== 'length' || msg.tool_calls?.length || msg.content) return msg;
+
+    /* Cut off mid-thought with nothing visible. The thinking is the work, and it
+       is already done, so put what got through back in front of the model and ask
+       for the conclusion alone — re-running the same request just thinks again. */
+    onStream?.({ type: 'log', text: this.model +
+      ' ran out of tokens while thinking; asking it for the answer only.' });
+    const retry = { ...body, messages: fitMessages([...messages,
+      { role: 'assistant', content: msg.reasoning ?? '' },
+      { role: 'user', content: 'Your reasoning was cut off by the token limit. Do not think ' +
+        'any further and do not repeat the reasoning: state the final answer now, in full, ' +
+        'from what you worked out above.' }], this.ctx, cap) };
+    const second = await this.send(retry, { signal, onStream, tools });
+    // Never trade a partial answer for nothing: keep the first message unless the
+    // retry actually said something.
+    return second.content || second.tool_calls?.length ? second : msg;
+  }
+
+  async send(body, { signal, onStream, tools }) {
     let res;
     try {
       res = await fetch(this.url + '/chat/completions', {
@@ -66,7 +87,7 @@ export class Chat {
 
     const msg = await readCompletion(res, {
       onStream, toolNames: (tools ?? []).map(t => t.function?.name) });
-    if (!msg.tool_calls?.length && msg.finish === 'length') onStream?.({ type: 'log',
+    if (!msg.tool_calls?.length && msg.finish === 'length' && msg.content) onStream?.({ type: 'log',
       text: this.model + ' hit its token limit before finishing - the answer is cut off.' });
     return msg;
   }
@@ -94,10 +115,13 @@ const apiHint = stderr => /AttributeError|ImportError|ModuleNotFoundError|NameEr
     'another attribute name will fail the same way.'
   : '';
 
-function makeTools(root, emit, te, cap = resultCap()) {
+function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'workspace/runs')) {
+  // The project is readable because the Skills and the live model live there; the
+  // scratch folder is the user's own and is the only other place in play.
   const jail = p => {
     const abs = resolve(root, p || '.');
-    if (!abs.startsWith(root)) throw new Error('path escapes the project: ' + p);
+    if (!abs.startsWith(root) && !abs.startsWith(scratch))
+      throw new Error('path escapes the project and the working folder: ' + p);
     return abs;
   };
   const py = join(root, '.venv/bin/python');
@@ -133,12 +157,14 @@ function makeTools(root, emit, te, cap = resultCap()) {
         .map(d => (d.isDirectory() ? d.name + '/' : d.name)).join('\n');
     },
     async run_python({ code }) {
-      const file = join(root, 'workspace/runs', 'run-' + Date.now() + '.py');
+      const file = join(scratch, 'run-' + Date.now() + '.py');
       await mkdir(dirname(file), { recursive: true });
       await writeFile(file, code);
       emit({ type: 'tools', tools: [{ name: 'python', input: { file: relative(root, file) } }] });
       return await new Promise(res => {
-        execFile(py, [file], { cwd: root, timeout: 180000, maxBuffer: 8e6 },
+        // cwd is the scratch folder, so anything the script writes by a relative
+        // path lands with the user's other work rather than in the install
+        execFile(py, [file], { cwd: scratch, timeout: 180000, maxBuffer: 8e6 },
           (err, out, errOut) => res(
             ((out || '') + (errOut ? '\n[stderr]\n' + errOut : '') +
              (err && !out && !errOut ? '\n[failed] ' + err.message : '') || '(no output)')
@@ -253,12 +279,12 @@ function fill(obj, schema) {
 }
 
 /* --------------------------- the workflow, verbatim --------------------------- */
-export async function runWorkflowFile({ root, chat, args, emit, signal, te }) {
+export async function runWorkflowFile({ root, chat, args, emit, signal, te, scratch }) {
   const src = await readFile(join(root, 'workflows/mca-tellurium.js'), 'utf8');
   const body = src.replace(/^\s*export\s+const\s+meta\s*=/m, 'const meta =');
   const cap = resultCap(chat.ctx);
   const system = localSystem({ tools: TOOL_NAMES, liveModel: args?.model ?? '', howToRun: HOW_TO_RUN });
-  const tools = makeTools(root, emit, te, cap);
+  const tools = makeTools(root, emit, te, cap, scratch);
 
   const agent = async (prompt, opts = {}) => {
     emit({ type: 'phase', phase: opts.phase, label: opts.label });
@@ -276,18 +302,20 @@ const TOOL_NAMES = ['load_skill', 'read_file', 'write_file', 'list_dir', 'run_py
 const HOW_TO_RUN = `THE LIVE MODEL is \`workspace/model.txt\`. Write that file to change what the user sees.
 
 \`run_python\` is your shell: it runs a Python script with tellurium, roadrunner, numpy
-and scipy importable, and returns only stdout — so print everything you need. Scripts
-are kept in workspace/runs/. There is no separate terminal; run_python is it.`;
+and scipy importable, and returns only stdout — so print everything you need. Every
+script is kept, and runs from the user's working folder, so a relative path you write
+to lands there beside it. There is no separate terminal; run_python is it.`;
 
 /* Handed to the workflow, which otherwise tells every stage to "run it with Bash". */
 const EXEC_NOTE =
   'Run the computation with `run_python`: one self-contained script, printing every ' +
-  'number you will report. Only stdout comes back. Save it with `write_file` under ' +
-  'workspace/runs/ first if you want the script kept as the reproducibility record.';
+  'number you will report. Only stdout comes back — every script you run is already ' +
+  'kept in the working folder as the reproducibility record.';
 
 /* ------------------------------ the outer turn ------------------------------ */
 export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow = true,
-                               liveModel = '', te, onEvent }) {
+                               liveModel = '', te, onEvent,
+                               scratch = join(root, 'workspace/runs') }) {
   const ctrl = new AbortController();
   const emit = o => onEvent(o);
   if (!chatCfg?.baseUrl || !chatCfg?.model) {
@@ -300,7 +328,7 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
   }
   const chat = new Chat(chatCfg);
   const cap = resultCap(chat.ctx);
-  const tools = makeTools(root, emit, te, cap);
+  const tools = makeTools(root, emit, te, cap, scratch);
 
   (async () => {
     try {
@@ -334,8 +362,8 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
           emit({ type: 'workflow_start' });
           const model = await readFile(join(root, 'workspace/model.txt'), 'utf8').catch(() => '');
           const out = await runWorkflowFile({
-            root, chat, emit, te, signal: ctrl.signal,
-            args: { question, model, needsNumbers, workdir: 'workspace/runs', exec: EXEC_NOTE },
+            root, chat, emit, te, scratch, signal: ctrl.signal,
+            args: { question, model, needsNumbers, workdir: scratch, exec: EXEC_NOTE },
           });
           emit({ type: 'workflow_done' });
           return JSON.stringify(out).slice(0, cap);

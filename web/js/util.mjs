@@ -27,6 +27,25 @@ export function ticks(lo,hi,n){
   return out;
 }
 
+/** Trailing debounce with a ceiling.
+
+    A plain debounce starves under a continuous stream: every call clears the
+    timer, so nothing runs until the stream stops. That is what made the sliders
+    look like they only updated on mouse-up. `budget()` returns the quiet gap to
+    wait for and the longest the oldest pending call may ever be held. */
+export function coalesce(fn, budget){
+  let t, oldest = 0;
+  const go = () => { clearTimeout(t); oldest = 0; fn(); };
+  return () => {
+    const now = performance.now();
+    if(!oldest) oldest = now;
+    const { wait, max } = budget();
+    if(now - oldest >= max) return go();
+    clearTimeout(t);
+    t = setTimeout(go, wait);
+  };
+}
+
 export function flash(btn, text, ms=900){
   const old=btn.textContent; btn.textContent=text; btn.disabled=true;
   setTimeout(()=>{ btn.textContent=old; btn.disabled=false; }, ms);

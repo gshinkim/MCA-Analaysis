@@ -1,5 +1,6 @@
 import { createServer } from 'node:http';
-import { readFile, writeFile, mkdir, stat, readdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, stat, readdir, access } from 'node:fs/promises';
+import { constants as FS } from 'node:fs';
 import { existsSync } from 'node:fs';
 import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,7 @@ const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
 const WORK = join(ROOT, 'workspace');
 const MODEL_FILE = join(WORK, 'model.txt');
+const RUNS = join(WORK, 'runs');
 const SETTINGS_FILE = join(WORK, 'settings.json');
 const PORT = Number(process.env.PORT || 5173);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -59,6 +61,20 @@ async function ensureWorkspace() {
   if (!existsSync(MODEL_FILE)) await writeFile(MODEL_FILE, DEFAULT_MODEL);
   if (!existsSync(SETTINGS_FILE))
     await writeFile(SETTINGS_FILE, JSON.stringify({ start: 0, end: 100, points: 50 }, null, 2));
+}
+
+/* Where the AI does its work. Default is the install's own scratch folder; the user
+   can point it anywhere they can write. Only the AI's scratch moves — the live model
+   and the simulation settings stay in workspace/ either way. */
+async function resolveScratch(dir) {
+  if (!dir) return RUNS;
+  const p = normalize(String(dir));
+  if (!p.startsWith('/')) throw new Error('the working folder must be an absolute path');
+  const st = await stat(p).catch(() => null);
+  if (!st) throw new Error('no such folder: ' + p);
+  if (!st.isDirectory()) throw new Error('not a folder: ' + p);
+  await access(p, FS.W_OK).catch(() => { throw new Error('cannot write to: ' + p); });
+  return p;
 }
 
 const modelVersion = async () => { try { return (await stat(MODEL_FILE)).mtimeMs; } catch { return 0; } };
@@ -188,6 +204,14 @@ const routes = {
                      home: homedir(), entries: [...dirs.sort(sort), ...files.sort(sort)] });
   },
 
+  'POST /api/scratch': async (req, res) => {
+    const { dir } = await body(req);
+    if (HOSTED) return json(res, 400, { ok: false,
+      error: 'This deployment runs Tellurium only; there is no local folder to write to.' });
+    try { json(res, 200, { ok: true, dir: await resolveScratch(dir), default: RUNS }); }
+    catch (e) { json(res, 200, { ok: false, error: String(e.message || e) }); }
+  },
+
   /* Probe an OpenAI-compatible endpoint and list the models it serves. */
   'POST /api/probe': async (req, res) => {
     const { baseUrl, apiKey } = await body(req);
@@ -229,7 +253,7 @@ const routes = {
   /* Server-sent events: one agent turn, streamed. */
   'POST /api/chat': async (req, res) => {
     const { message, sessionId, model, env, runtime, chatCfg, history,
-            useWorkflow = true } = await body(req);
+            scratchDir, useWorkflow = true } = await body(req);
     if (!message?.trim()) return json(res, 400, { error: 'message is empty' });
     if (HOSTED) return json(res, 400, { error:
       'This deployment runs Tellurium only. Pick a local model in Settings — it runs on ' +
@@ -242,6 +266,10 @@ const routes = {
         '(Ollama: http://localhost:11434, LM Studio: http://localhost:1234), press ' +
         '"Test & list models", then Save.' });
     await ensureWorkspace();
+    let scratch;
+    try { scratch = await resolveScratch(scratchDir); }
+    catch (e) { return json(res, 400, { error: 'Working folder: ' + e.message +
+      ' — pick another in Settings, or clear it to use the default.' }); }
     const before = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
 
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8',
@@ -266,9 +294,9 @@ const routes = {
     process.nextTick(() => {});
     const run = runtime === 'openai'
       ? runLocalAgent({ root: ROOT, prompt: message, history: history || [], chatCfg,
-                        useWorkflow, liveModel: before, te, onEvent })
+                        useWorkflow, liveModel: before, te, scratch, onEvent })
       : runAgent({ root: ROOT, prompt: message, sessionId, model, env: env || {},
-                   useWorkflow, liveModel: before, onEvent });
+                   useWorkflow, liveModel: before, scratch, onEvent });
     send({ type: 'session', sessionId: run.sessionId ?? sessionId ?? null, runtime: runtime || 'claude-code' });
     req.on('close', () => { clearInterval(ka); run.kill(); });
   },

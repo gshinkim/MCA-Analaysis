@@ -3,7 +3,7 @@ import { $ } from './util.mjs';
 /* The browser cannot hand back a real filesystem path from <input type=file>,
    so this browses the server's filesystem and returns the absolute path. */
 
-let resolveFn = null, cur = null, filter = '', picked = null;
+let resolveFn = null, cur = null, filter = '', picked = null, dirsOnly = false;
 
 function ensureDom(){
   if($('#fp')) return;
@@ -25,7 +25,7 @@ function ensureDom(){
     </div>`;
   document.body.append(d);
   $('#fpClose').onclick = $('#fpCancel').onclick = () => close(null);
-  $('#fpOk').onclick = () => close(picked);
+  $('#fpOk').onclick = () => close(dirsOnly ? cur?.path : picked);
   $('#fpUp').onclick = () => { if(cur?.parent) load(cur.parent); };
 }
 
@@ -44,12 +44,16 @@ async function load(path){
   if(r.error){ $('#fpList').innerHTML='<p class="hint" style="padding:12px">'+r.error+'</p>'; return; }
   cur = r; picked = null;
   $('#fpCur').textContent = r.path;
-  $('#fpSel').textContent = '';
-  $('#fpOk').disabled = true;
+  // choosing a folder means choosing the one you are standing in, so the button
+  // is live the moment the listing loads
+  $('#fpSel').textContent = dirsOnly ? r.path : '';
+  $('#fpOk').textContent = dirsOnly ? 'Choose this folder' : 'Choose';
+  $('#fpOk').disabled = !dirsOnly;
   $('#fpUp').disabled = !r.parent;
   const L=$('#fpList'); L.textContent='';
   if(!r.entries.length) L.innerHTML='<p class="hint" style="padding:12px">Nothing here'+(filter?' matching '+filter:'')+'.</p>';
   for(const e of r.entries){
+    if(dirsOnly && !e.dir) continue;
     const b=document.createElement('button');
     b.className='fp-row'; b.type='button';
     b.innerHTML = (e.dir?'<span class="fp-ic">📁</span>':'<span class="fp-ic">📄</span>')+
@@ -66,10 +70,10 @@ async function load(path){
   }
 }
 
-/** pickFile({title, ext, start}) → absolute path, or null if cancelled. */
-export function pickFile({ title='Choose a file', ext='', start=null } = {}){
+/** pickFile({title, ext, start, dirs}) → absolute path, or null if cancelled. */
+export function pickFile({ title='Choose a file', ext='', start=null, dirs=false } = {}){
   ensureDom();
-  filter = ext;
+  filter = ext; dirsOnly = dirs;
   $('#fpTitle').textContent = title;
   $('#fp').classList.add('on');
   $('#scrim').classList.add('on');

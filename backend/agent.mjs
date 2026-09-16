@@ -24,7 +24,6 @@ Simulation settings the user has set live in workspace/settings.json
 
 Tellurium is installed at ./.venv/bin/python (tellurium, roadrunner, numpy, scipy).
 Always invoke it as ./.venv/bin/python - the system python3 does NOT have tellurium.
-Write scratch scripts under workspace/runs/ so the user can inspect them afterwards.
 
 Route every analysis through the ${WORKFLOW} workflow, per your agent definition.
 `.trim();
@@ -68,8 +67,21 @@ Be proportionate: a short question gets a short, direct answer.
 // and continued with --resume; guessing wrong is an immediate exit(1).
 const STARTED = new Set();
 
+/* The user's working folder. Everything the agent produces goes here; the project
+   itself stays read-mostly, holding the Skills, the venv and the live model. */
+export const scratchBlock = dir => `
+
+## Your working folder
+
+\`${dir}\`
+
+Every script, table, figure and data file you produce goes in there, and nothing you
+create belongs anywhere else. Write to it by absolute path. It is the user's folder,
+so leave it readable: name files for what they are, not run-1234567890.py.
+The live model stays at workspace/model.txt - that one is still edited in place.`;
+
 export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow = true,
-                          liveModel = '', onEvent }) {
+                          liveModel = '', scratch = '', onEvent }) {
   const resuming = !!sessionId && STARTED.has(sessionId);
   const sid = resuming ? sessionId : randomUUID();
   STARTED.add(sid);
@@ -90,10 +102,12 @@ export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow
     '--allowedTools',
     'Skill', ...(useWorkflow ? ['Workflow'] : []), 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite',
     'Bash(./.venv/bin/python:*)', 'Bash(.venv/bin/python:*)', 'Bash(cat:*)', 'Bash(ls:*)',
-    '--append-system-prompt', SYSTEM_APPEND + liveModelBlock(liveModel) +
+    '--append-system-prompt', SYSTEM_APPEND + (scratch ? scratchBlock(scratch) : '') +
+                              liveModelBlock(liveModel) +
                               (useWorkflow ? '' : '\n\n' + NO_WORKFLOW),
     '--settings', JSON.stringify({ enableWorkflows: useWorkflow }),
     '--add-dir', root,
+    ...(scratch && !scratch.startsWith(root) ? ['--add-dir', scratch] : []),
   ];
   if (model) args.push('--model', model);
 

@@ -15,7 +15,7 @@ const BUILTIN = [
   { id:'sonnet', t:'Claude Sonnet 5' },
   { id:'haiku',  t:'Claude Haiku 4.5' },
 ];
-const DEF = { endpoints: [], useWorkflow: true, localCfg:{
+const DEF = { endpoints: [], useWorkflow: true, scratchDir: '', localCfg:{
   olUrl:'http://localhost:11434', lmUrl:'http://localhost:1234', ggufPath:'', ggufUrl:'http://localhost:8080' } };
 
 /* Every local server the settings pane can hold. This used to be a radio group, so
@@ -38,6 +38,9 @@ let draft = null;
 
 /* ---- what the chat layer needs to start a turn ---- */
 export const useWorkflow = () => settings().useWorkflow !== false;
+/* '' means the install's own workspace/runs — the server resolves the default, so
+   the page never has to know an absolute path it did not choose. */
+export const scratchDir = () => settings().scratchDir || '';
 
 export function resolveModel(sel){
   const s = settings();
@@ -261,7 +264,7 @@ function renderLocal(){
 /* ---- drawer ---- */
 export function openSettings(){
   draft = structuredClone(settings());
-  renderEndpoints(); renderLocal(); renderEnv(); renderFound();
+  renderEndpoints(); renderLocal(); renderEnv(); renderFound(); renderScratch();
   $('#wfToggle').checked = draft.useWorkflow !== false;
   $('#wfToggle').onchange = e => { draft.useWorkflow = e.target.checked; };
   $('#settings').classList.add('on'); $('#scrim').classList.add('on');
@@ -294,10 +297,37 @@ function renderEnv(){
 }
 export const refreshEnv = renderEnv;
 
+/* ---- the AI's working folder (local installs only; hosted has no filesystem) ---- */
+function renderScratch(){
+  const row = $('#scratchRow');
+  row.hidden = !!S.env?.hosted;
+  if(row.hidden) return;
+  $('#scratchPath').textContent = draft.scratchDir || 'Default — workspace/runs in the app folder';
+  $('#scratchPath').title = draft.scratchDir || '';
+  $('#scratchMsg').textContent = '';
+}
+
+async function chooseScratch(){
+  const dir = await pickFile({ title: 'Choose the AI\u2019s working folder', dirs: true,
+                               start: draft.scratchDir || null });
+  if(!dir) return;
+  // check it before saving: a folder that cannot be written to should fail here,
+  // not halfway through the first turn that tries to use it
+  const r = await fetch('/api/scratch', { method:'POST',
+    headers:{'content-type':'application/json'}, body: JSON.stringify({ dir }) })
+    .then(r=>r.json()).catch(e=>({ ok:false, error:String(e.message||e) }));
+  if(!r.ok){ $('#scratchMsg').innerHTML = '<span class="err">'+r.error+'</span>'; return; }
+  draft.scratchDir = r.dir;
+  renderScratch();
+  $('#scratchMsg').textContent = 'Checked and writable. Save to apply.';
+}
+
 export function initSettings(){
   $('#settingsBtn').onclick=openSettings;
   $('#settingsClose').onclick=closeSettings;
   $('#settingsCancel').onclick=closeSettings;
+  $('#scratchPick').onclick = chooseScratch;
+  $('#scratchClear').onclick = ()=>{ draft.scratchDir=''; renderScratch(); };
   $('#addKey').onclick=()=>{ draft.endpoints.push({name:'',base:'',key:'',models:''}); renderEndpoints(); };
   $('#saveSettings').onclick=()=>{
     store.set('settings',draft); fillModels();
