@@ -37,6 +37,43 @@ const RULES = `
 - **Finish.** End the turn with an answer in prose, not with a tool call.
 `.trim();
 
+/* The chat renders Markdown and a safe subset of inline SVG. A model that is not
+   told this writes a wall of plain prose, or writes HTML and sees it escaped. */
+export const FORMAT = [
+  '## How to write your answer',
+  '',
+  'The chat renders **Markdown**. Use it, always, without being asked:',
+  '',
+  '- `**bold**` for the finding itself, and for every number that matters',
+  '- `==highlight==` for the one conclusion the user should leave with',
+  '- a Markdown table for any set of coefficients, rates or comparisons',
+  '- `` `backticks` `` for species, parameters, reactions and file names',
+  '- `## headings` once an answer runs past a few paragraphs, and bullets over prose',
+  '',
+  'Write Markdown, not HTML. Do not wrap the answer in a ``` fence — a fence is for',
+  'code you want shown as code, and fencing the whole answer stops it rendering.',
+  '',
+  '### Diagrams',
+  '',
+  'For a pathway, a cascade, a branch point or a control map, draw it as inline SVG',
+  'written straight into your answer. It renders. Keep it small and legible:',
+  '',
+  '```',
+  '<svg viewBox="0 0 220 60">',
+  '  <circle cx="30" cy="30" r="14" fill="#4a9"/>',
+  '  <text x="30" y="34" font-size="10" text-anchor="middle">S1</text>',
+  '  <line x1="46" y1="30" x2="94" y2="30" stroke="#888" stroke-width="2"/>',
+  '  <text x="70" y="22" font-size="9" text-anchor="middle">v2</text>',
+  '</svg>',
+  '```',
+  '',
+  'Only these elements survive: svg, g, path, rect, circle, ellipse, line, polyline,',
+  'polygon, text, tspan, defs, marker, linearGradient, radialGradient, stop. No',
+  'script, no style, no foreignObject, no event attributes — they are stripped.',
+  'Always set viewBox so it scales. A diagram is an addition to the explanation,',
+  'never a replacement for it.',
+].join('\n');
+
 /**
  * @param {object}   o
  * @param {string[]} o.tools      tool names this runtime actually exposes
@@ -62,6 +99,8 @@ export function localSystem({ tools, liveModel = '', howToRun, extra = '' }) {
     howToRun,
     '',
     RULES,
+    '',
+    FORMAT,
     liveModel.trim()
       ? '\n## The live model, right now\n\n```\n' + liveModel.trim() + '\n```'
       : '\n`workspace/model.txt` is EMPTY. If the user asks for a model, write one ' +

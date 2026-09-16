@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { FORMAT } from '../web/js/prompt.mjs';
 
 /* The agent runtime is the Claude Code CLI, because that is what the project's
    assets are written against: agents/model-scientist.md is a subagent definition
@@ -26,6 +27,8 @@ Tellurium is installed at ./.venv/bin/python (tellurium, roadrunner, numpy, scip
 Always invoke it as ./.venv/bin/python - the system python3 does NOT have tellurium.
 
 Route every analysis through the ${WORKFLOW} workflow, per your agent definition.
+
+${FORMAT}
 `.trim();
 
 /* The model is pasted in, not just pointed at: an agent that asks "is there a model?"
