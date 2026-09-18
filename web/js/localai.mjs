@@ -27,6 +27,15 @@ async function ping(base, path, init = {}){
   }
 }
 
+/**
+ * True when the page and the target sit in the same address space, so Local
+ * Network Access does not apply. A page served from 127.0.0.1 reaching
+ * localhost:1234 is loopback→loopback: nothing to grant, nothing to block.
+ */
+export function samePageSpace(url, origin = globalThis.location?.origin){
+  return !!origin && LOOPBACK.test(origin) && spaceFor(url) === 'loopback';
+}
+
 export async function permissionState(){
   try { return (await navigator.permissions.query({ name: 'local-network-access' })).state; }
   catch { return 'unsupported'; }
@@ -73,7 +82,14 @@ export async function probe(baseUrl){
     return { status: 'permission', detail:
       'Local network access is blocked for this site. Click the icon at the left of the ' +
       'address bar → Site settings → allow "Local network access", then try again.' };
-  if (before === 'prompt' && after === 'prompt' && ms < 50)
+  /* A refused connection and a blocked one are both an instant TypeError, so "fast
+     failure" alone never meant the browser blocked it: with nothing listening on
+     the port this told people to click Allow, which could not help. Local Network
+     Access only gates a request that LEAVES an address space, so a loopback page
+     asking loopback is never gated — there the fast failure is a closed port or a
+     missing CORS header, which is what the branch below already says, with the
+     command that fixes either. */
+  if (before === 'prompt' && after === 'prompt' && ms < 50 && !samePageSpace(baseUrl))
     return { status: 'permission', detail:
       'The browser blocked the request to your machine. Click Connect again and choose ' +
       'Allow on the "local network" prompt.' };
