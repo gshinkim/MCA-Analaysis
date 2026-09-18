@@ -1,4 +1,32 @@
-model dropped()
-  A -> B; k*A
-  A=3; B=0; k=0.4
+model negative_feedback_oscillator()
+  // Sustained oscillator: 4-step chain S1 -> S2 -> S3 -> S4, with the last
+  // species S4 inhibiting the first step J0 via a Hill term S4^h in the
+  // denominator. Strong cooperative feedback (h = 10) destabilises the
+  // steady state into a limit cycle.
+  //
+  //   dS1/dt = v_J0 - v_J1
+  //   dS2/dt = v_J1 - v_J2
+  //   dS3/dt = v_J2 - v_J3
+  //   dS4/dt = v_J3 - v_J4
+  //
+  // $X0 is a fixed source, $X1 a fixed sink.
+
+  J0: $X0 -> S1; (VM1 * (X0 - S1/Keq1)) / (1 + X0 + S1 + S4^h)
+  J1: S1 -> S2; (10 * S1 - 2 * S2) / (1 + S1 + S2)
+  J2: S2 -> S3; (10 * S2 - 2 * S3) / (1 + S2 + S3)
+  J3: S3 -> S4; (10 * S3 - 2 * S4) / (1 + S3 + S4)
+  J4: S4 -> $X1; (V4 * S4) / (KS4 + S4)
+
+  S1 = 0
+  S2 = 0
+  S3 = 0
+  S4 = 0
+  X0 = 10
+  X1 = 0
+
+  VM1 = 10
+  Keq1 = 10
+  h = 10
+  V4 = 2.5
+  KS4 = 0.5
 end
