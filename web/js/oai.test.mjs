@@ -261,6 +261,31 @@ const streamOf = (...chunks) => ({
   assert.notEqual(fit[1].role, 'tool');
   assert.ok(resultCap(8192) < 40000 && resultCap(8192) > 1500);
 }
+
+/* Trimming may never hand back a request with no user turn. Two big tool results
+   (loading two Skills) outgrow the window, and dropping the oldest messages ate
+   the question itself: the server answered HTTP 500 "no user query found in
+   messages" and the turn died. The question is what the request is FOR, so it is
+   pinned the way the system message is. */
+{
+  const big = 'x'.repeat(40000);
+  const msgs = [
+    { role:'system', content:'sys '.repeat(1200) },
+    { role:'user', content:'build an oscillating model' },
+    { role:'assistant', content:'', tool_calls:[{id:'1',type:'function',
+      function:{name:'load_skill',arguments:'{"name":"pathway-modeling"}'}}] },
+    { role:'tool', tool_call_id:'1', content: big },
+    { role:'assistant', content:'', tool_calls:[{id:'2',type:'function',
+      function:{name:'load_skill',arguments:'{"name":"tellurium"}'}}] },
+    { role:'tool', tool_call_id:'2', content: big },
+  ];
+  // the reserve the runtime really passes is replyTokens(ctx) — half the window
+  const fit = fitMessages(msgs, 8192, 4096);
+  assert.ok(fit.some(m => m.role === 'user'), 'the question survives trimming');
+  assert.equal(fit.find(m => m.role === 'user').content, 'build an oscillating model');
+  assert.equal(fit[0].role, 'system', 'system still leads');
+  assert.notEqual(fit[1]?.role, 'tool', 'still never orphans a result');
+}
 console.log('stream + budget ok');
 
 /* ---------------- repeat escalation + leaked tool syntax ---------------- */

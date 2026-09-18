@@ -178,7 +178,8 @@ function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'work
 
   const schemas = [
     ['load_skill', 'Load a Skill and list its reference files. Use before making any domain claim.',
-      { name: { type: 'string', enum: ['mca', 'tellurium', 'mca-tellurium'] } }, ['name']],
+      { name: { type: 'string',
+                enum: ['mca', 'tellurium', 'mca-tellurium', 'pathway-modeling'] } }, ['name']],
     ['read_file', 'Read a file in the project (e.g. a Skill reference, or workspace/model.txt).',
       { path: { type: 'string' } }, ['path']],
     ['write_file', 'Write a file in the project. Edit the live model at workspace/model.txt.',

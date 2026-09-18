@@ -36,6 +36,18 @@ const RULES = `
   your choices. Name them, and say which ones the behaviour is sensitive to.
 - **Load a Skill before any claim it owns.** Route from that Skill's own tables to
   the one or two references you need; loading it wholesale is a defect.
+  - \`mca\` — control coefficients, elasticities, the summation and connectivity
+    theorems, rate-limiting claims, how control is distributed.
+  - \`tellurium\` — the software: Antimony syntax, RoadRunner calls, what a given
+    function returns, why a model will not load.
+  - \`pathway-modeling\` — the modelling itself: choosing rate laws, stoichiometry
+    and the system equation, ODE vs stochastic (Gillespie, bursting, focusing),
+    computing a steady state, Jacobians and stability, bifurcation and
+    bistability, fitting to data and uncertainty, Bayesian inference, compartments
+    and transport, feedforward motifs, moiety cycles and ultrasensitivity, SBML
+    and the modelling standards.
+  Two of them can own different parts of one answer: load both, and say which is
+  the authority for which part.
 - **Say how well supported each part of the answer is**, and name what you did not
   establish. An unvalidated number is worse than no number.
 - **Be proportionate.** A short question gets a short, direct answer.

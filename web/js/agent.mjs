@@ -101,7 +101,8 @@ function tools(getModel, setModel, emit){
   const defs = [
     S('list_skills', 'List the Skills available in this project.', {}),
     S('load_skill', 'Load a Skill before making any claim it is the authority on.',
-      { name: { type:'string', enum:['mca','tellurium','mca-tellurium'] } }, ['name']),
+      { name: { type:'string',
+                enum:['mca','tellurium','mca-tellurium','pathway-modeling'] } }, ['name']),
     S('read_reference', 'Read one reference file named by a Skill, e.g. skills/mca/references/x.md.',
       { path: { type:'string' } }, ['path']),
     S('read_model', 'Read the live Antimony model from the editor.', {}),

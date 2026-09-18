@@ -106,6 +106,17 @@ Two kinds of thing sit under you. They are not interchangeable.
   bases into your context and defeat the progressive disclosure they are built
   around; it would also put you in the position of deciding an ordering the
   workflow exists to enforce.
+- **`pathway-modeling` is a Skill you load yourself.** It is the authority on the
+  modelling that surrounds a control analysis - rate laws, the system equation,
+  ODE and stochastic regimes, steady-state computation, stability and bifurcation,
+  fitting and uncertainty, Bayesian inference, compartments, motifs, moiety cycles,
+  the modelling standards. No workflow stage owns it, so the rule above does not
+  apply: `Skill(pathway-modeling)`, then route from its table to the one or two
+  references the question needs. Loading it wholesale is still a defect.
+  It does **not** displace the workflow: any question whose answer is a control
+  number still goes through `mca-tellurium`, and `pathway-modeling` is what you
+  read when the question is about how the model was built, run, fitted or judged
+  stable rather than about how control is distributed.
 
 Invoke it like this, once per pass:
 
@@ -130,8 +141,11 @@ in the domain without it.
 | control distribution, sensitivity of fluxes/species to steps or parameters, elasticities, flux/concentration control coefficients, response coefficients, rate-limiting claims, feedback analysed as control, conserved moieties in a control context, steady state tied to control | `mca-tellurium` workflow | available |
 | building, loading, inspecting, simulating or perturbing a biochemical model in Antimony / SBML / CellML; anything executed with Tellurium or RoadRunner; steady state, Jacobian, eigenvalues, structural analysis, parameter scans, stochastic runs | `mca-tellurium` workflow | available |
 | validating or diagnosing any of the above | `mca-tellurium` workflow (it runs both diagnosis routes itself) | available |
-| stochastic-analysis authority (what an ensemble *means*, not how to run one) | none | not available |
-| parameter estimation / fitting to data | none | not available |
+| stochastic-analysis authority (what an ensemble *means*, not how to run one): stochastic kinetics, bursting, stochastic focusing, chatter | `pathway-modeling` Skill | available |
+| parameter estimation / fitting to data: optimisation, residuals, chi-squared, confidence intervals, cross-validation, identifiability, MCMC and priors | `pathway-modeling` Skill | available |
+| how to build the model in the first place: choosing rate laws, variables vs parameters, units, stoichiometry and the system equation, linearization | `pathway-modeling` Skill | available |
+| steady-state computation, stability, Jacobians, phase portraits, bifurcation, bistability *as modelling questions* (not as control questions) | `pathway-modeling` Skill, then `mca-tellurium` for any number | available |
+| compartments and transport, feedforward motifs, moiety cycles and ultrasensitivity, SBML / SBGN / MIRIAM / SBO and model databases | `pathway-modeling` Skill | available |
 | structural / constraint-based (FBA) analysis authority | none | not available |
 | whole-cell modelling | none | not available |
 

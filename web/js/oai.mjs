@@ -350,9 +350,19 @@ export async function readCompletion(res, { onStream, toolNames = [] } = {}) {
    transcript silently lost its oldest messages mid-turn: the model stopped
    seeing the tool result it had just been given and asked for it again, which is
    the looping. Everything below sizes the turn to fit instead.
-   ponytail: one default, overridable per model; detect it per provider only if
-   8192 turns out to be wrong often enough to matter. */
-export const CONTEXT_DEFAULT = 8192;
+
+   8192 was that default until a turn that loaded two Skills stopped fitting in
+   it. Half the window is reserved for the reply, so 8192 leaves a 4096-token
+   prompt budget, and one Skill is ~2500 of it. Measured on a real "build an
+   oscillating model" turn — system prompt, question, two Skills, one reference
+   file, a write and a simulate result — the transcript is 11,107 tokens and
+   first survives whole at 24576. Below that the trimmer drops a Skill the model
+   just loaded and it loads it again: the looping, back in a new place.
+   ponytail: still one default, overridable per model in Settings → Runtime;
+   detect it per provider only if this number turns out to be wrong too. A model
+   served with a smaller window than this truncates on its own side, where
+   nothing here can see it. */
+export const CONTEXT_DEFAULT = 24576;
 const CHARS_PER_TOKEN = 3.5;
 
 /* How the window is divided, as shares of it rather than absolute token counts:
@@ -387,11 +397,19 @@ export const estTokens = messages =>
         (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0) + 16, 0) / CHARS_PER_TOKEN);
 
 /**
- * Drop the oldest exchanges until the turn fits, keeping the system message.
+ * Drop the oldest exchanges until the turn fits, keeping the system message and
+ * the question.
  *
  * Cutting at an arbitrary point would leave a `tool` message whose call is gone,
  * which strict servers reject outright, so the window always starts on a message
  * that can stand alone.
+ *
+ * The first user message is pinned for the same reason. It sits at the front of
+ * the transcript, so trimming the oldest messages reached it first: two Skill
+ * loads in one turn were enough to outgrow the window, and what went to the
+ * server was `system, assistant, tool` with the question gone. Ollama rejects
+ * that with HTTP 500 "no user query found in messages". Keeping it also keeps
+ * the turn pointed at what was actually asked.
  */
 export function fitMessages(messages, ctx = CONTEXT_DEFAULT, reserve = 1024) {
   const budget = Math.max(512, ctx - reserve);
@@ -399,10 +417,14 @@ export function fitMessages(messages, ctx = CONTEXT_DEFAULT, reserve = 1024) {
   const [system, ...rest] = messages;
   const head = messages[0]?.role === 'system' ? [system] : [];
   const body = head.length ? rest : messages;
+  const askAt = body.findIndex(m => m.role === 'user');
+  const ask = askAt >= 0 ? [body[askAt]] : [];
+  const tail = askAt >= 0 ? body.slice(askAt + 1) : body;
+  const keep = [...head, ...ask];
   let start = 0;
-  while (start < body.length && estTokens([...head, ...body.slice(start)]) > budget) start++;
-  while (start < body.length && body[start].role === 'tool') start++;   // never orphan a result
-  return [...head, ...body.slice(start)];
+  while (start < tail.length && estTokens([...keep, ...tail.slice(start)]) > budget) start++;
+  while (start < tail.length && tail[start].role === 'tool') start++;   // never orphan a result
+  return [...keep, ...tail.slice(start)];
 }
 
 /**
