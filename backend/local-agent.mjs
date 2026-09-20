@@ -319,7 +319,7 @@ const EXEC_NOTE =
 
 /* ------------------------------ the outer turn ------------------------------ */
 export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow = true,
-                               liveModel = '', te, onEvent,
+                               liveModel = '', te, onEvent, summary = '',
                                scratch = join(root, 'workspace/runs') }) {
   const ctrl = new AbortController();
   const emit = o => onEvent(o);
@@ -337,16 +337,22 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
 
   (async () => {
     try {
+      const memory = !summary.trim() ? '' : [
+        '', '## What happened earlier in this session', '',
+        'Your own compressed record of the turns before the ones you can see.',
+        'Treat it as established; do not re-derive it.', '', summary.trim(), '',
+      ].join('\n');
+
       const system = localSystem({
         tools: useWorkflow ? [...TOOL_NAMES, 'run_mca_workflow'] : TOOL_NAMES,
         liveModel, howToRun: HOW_TO_RUN,
-        extra: useWorkflow
+        extra: (useWorkflow
           ? '\n## The workflow\n\nAnything needing numbers — control, elasticities, control ' +
             'coefficients, steady state in a control context — MUST go through `run_mca_workflow`. ' +
             'Answer directly only for questions that need no computation.'
           : '\n## The workflow is off\n\nThe user turned the seven-stage workflow off because it ' +
             'is slow. Do not ask for it back and do not refuse the work — do the analysis yourself, ' +
-            'keeping every rule above.',
+            'keeping every rule above.') + memory,
       });
 
       const wfDef = { type: 'function', function: {

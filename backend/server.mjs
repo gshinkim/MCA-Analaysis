@@ -7,9 +7,10 @@ import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { Tellurium } from './tellurium.mjs';
 import { runAgent, toUiEvent } from './agent.mjs';
-import { runLocalAgent } from './local-agent.mjs';
+import { runLocalAgent, Chat } from './local-agent.mjs';
 import { homedir } from 'node:os';
-import { listSessions, saveSession, openSession, deleteSession } from './sessions.mjs';
+import { listSessions, saveSession, openSession, deleteSession,
+         sessionDir, readSummary, writeSummary, splitHistory, summaryPrompt } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -291,8 +292,8 @@ const routes = {
 
   /* Server-sent events: one agent turn, streamed. */
   'POST /api/chat': async (req, res) => {
-    const { message, sessionId, model, env, runtime, chatCfg, history,
-            scratchDir, useWorkflow = true } = await body(req);
+    const { message, sessionId, sessionDirId, model, env, runtime, chatCfg, history,
+            scratchDir, useWorkflow = true, resume = false } = await body(req);
     if (!message?.trim()) return json(res, 400, { error: 'message is empty' });
     if (HOSTED) return json(res, 400, { error:
       'This deployment runs Tellurium only. Pick a local model in Settings — it runs on ' +
@@ -305,11 +306,17 @@ const routes = {
         '(Ollama: http://localhost:11434, LM Studio: http://localhost:1234), press ' +
         '"Test & list models", then Save.' });
     await ensureWorkspace();
-    let scratch;
+    let scratch = RUNS;
     try { scratch = await resolveScratch(scratchDir); }
     catch (e) { return json(res, 400, { error: 'Working folder: ' + e.message +
       ' — pick another in Settings, or clear it to use the default.' }); }
     const before = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
+
+    // The session's own folder is where its memory and its scratch both live.
+    let sdir = null;
+    if (sessionDirId) sdir = await sessionDir(RUNS, sessionDirId).catch(() => null);
+    const summary = sdir ? await readSummary(sdir) : '';
+    if (sdir) { await mkdir(sdir, { recursive: true }); scratch = sdir; }
 
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8',
                          'cache-control': 'no-cache', connection: 'keep-alive',
@@ -324,6 +331,23 @@ const routes = {
           // compare content, not mtime — the editor autosaves during a turn
           const after = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
           if (after !== before) send({ type: 'model_changed', src: after, version: await modelVersion() });
+
+          /* Roll the memory forward: anything past the newest twelve messages is
+             folded into summary.md by whichever model the user is already using, so
+             turn 1 still exists at turn 90. One cheap call per twelve turns. */
+          if (sdir && runtime === 'openai' && (history?.length ?? 0) > 12) {
+            const { fold } = splitHistory(history);
+            if (fold.length) try {
+              const chat = new Chat(chatCfg);
+              const msg = await chat.complete({ messages: summaryPrompt(summary, fold),
+                                                maxTokens: 900 });
+              if (msg.content?.trim()) {
+                await writeSummary(sdir, msg.content.trim());
+                send({ type: 'compacted', summary: msg.content.trim() });
+              }
+            } catch (e) { console.error('[compact]', e.message); }  // never fail the turn
+          }
+
           clearInterval(ka);
           if (!res.writableEnded) res.end();
         }
@@ -333,9 +357,9 @@ const routes = {
     process.nextTick(() => {});
     const run = runtime === 'openai'
       ? runLocalAgent({ root: ROOT, prompt: message, history: history || [], chatCfg,
-                        useWorkflow, liveModel: before, te, scratch, onEvent })
+                        useWorkflow, liveModel: before, te, scratch, summary, onEvent })
       : runAgent({ root: ROOT, prompt: message, sessionId, model, env: env || {},
-                   useWorkflow, liveModel: before, scratch, onEvent });
+                   useWorkflow, liveModel: before, scratch, summary, resume, onEvent });
     send({ type: 'session', sessionId: run.sessionId ?? sessionId ?? null, runtime: runtime || 'claude-code' });
     req.on('close', () => { clearInterval(ka); run.kill(); });
   },
