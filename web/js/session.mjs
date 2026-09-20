@@ -31,6 +31,12 @@ export function initSession(hooks) { ({ getName, getModel, getSettings, getChats
 
 export const currentId = () => S.sessionDirId;
 
+/** The folder id this session will land in, even before any save has happened —
+    the same fallback saveNow() uses. Turn 1 needs this so the server has an sdir
+    to write summary.md/thinking.md into from the very first turn, instead of only
+    from the second turn onward once currentId() finally has a real value. */
+export const pendingId = () => S.sessionDirId ?? defaultId(getName());
+
 /** No folder exists yet, and nothing in any chat is worth creating one for.
     Guards saveNow against recreating a just-deleted session: once a turn
     completes, its chat gets a log entry and saving proceeds normally. */

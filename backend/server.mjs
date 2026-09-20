@@ -355,9 +355,11 @@ const routes = {
           /* summary.md is written every turn a session folder exists, for every
              runtime — but only ever describes turns that just folded OUT of the
              live window (`fold`, above), never the window itself. 'record'
-             (nothing folded yet, short history) writes nothing: the whole
-             conversation is still live, so there is nothing to remember on its
-             behalf yet. 'compress' folds `fold` into the running summary through
+             (nothing folded yet, short history) only creates the file if it
+             doesn't already hold real content — the whole conversation is still
+             live, so there's nothing NEW to remember, but a prior compaction's
+             content must survive every 'record' turn that follows it. 'compress'
+             folds `fold` into the running summary through
              the model already in use when there's a cheap completion endpoint for
              it (OpenAI-compatible). 'trim' (Claude Code, no cheap completion
              endpoint) records the same `fold` verbatim-but-bounded instead of
@@ -380,12 +382,24 @@ const routes = {
                 }
               }
             } else if (strategy === 'trim') {
-              await writeSummary(sdir, trimRecord(fold));
-            } else {
-              // ponytail: skipped the "still all in context" human note the design
-              // doc allows here — nothing folded means nothing to inject, and the
-              // file existing (even empty) is what "always exists" requires. Add
-              // the note if a human reading the folder needs it.
+              const text = trimRecord(fold);
+              await writeSummary(sdir, text);
+              // Claude Code never gets a 'compacted' event otherwise (that's only sent
+              // from the 'compress' branch above), so its client-side history grows
+              // unboundedly and eventually blows the request body limit. Sending the
+              // same event here lets chat.mjs's existing handler trim c.history the
+              // same way it already does for the compress runtime — only after this
+              // fold is actually written to disk, never before (see the comment on
+              // the client's 'compacted' handler for why that order matters).
+              send({ type: 'compacted', summary: text });
+            } else if (!summary?.trim()) {
+              // 'record': nothing folded this turn, so there is nothing new to write —
+              // but writing unconditionally here used to overwrite whatever the LAST
+              // compaction (compress or trim) had just written, every single turn
+              // after any compaction, because the client trims history back down to
+              // exactly KEEP right after a fold and the next turn's historyLength <=
+              // KEEP reads as 'record' again. Only create the file when it doesn't
+              // already hold real content; never blow away memory that's already there.
               await writeSummary(sdir, '');
             }
           } catch (e) { console.error('[summary]', e.message); }  // never fail the turn

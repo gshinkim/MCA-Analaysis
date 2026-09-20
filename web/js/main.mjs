@@ -99,6 +99,11 @@ async function commit(){
   await api.putModel(editor.value);
   api.putSettings(cfg());
   run();
+  // Direct edits (editor input, tStart/tEnd/nPts) all funnel through here, same as
+  // a chat turn or a rename — without this, editing a session's model without ever
+  // sending a chat message never reaches its runs/ snapshot (worthSaving still
+  // guards against creating a folder for a session with no completed turns).
+  saveSoon();
 }
 const commitSoon = coalesce(commit, () => {
   const wait = S.lastRunMs > 150 ? 200 : 30;

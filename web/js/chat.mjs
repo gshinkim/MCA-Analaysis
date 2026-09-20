@@ -5,7 +5,7 @@ import { resolveModel, useWorkflow, scratchDir, openSettings } from './settings.
 import { runBrowserAgent } from './agent.mjs';
 import { renderMarkdown } from './md.mjs';
 import { downloadChat } from './export.mjs';
-import { currentId, saveSoon, setTurnBusy, openSessionById, deleteCurrent } from './session.mjs';
+import { currentId, pendingId, saveSoon, setTurnBusy, openSessionById, deleteCurrent } from './session.mjs';
 import { pickSession } from './sessionpicker.mjs';
 
 const SUGGEST = [
@@ -315,7 +315,7 @@ function send(){
     abort = () => a.kill();
   } else {
     abort = api.chat({ message: v, sessionId: c.sessionId, history: c.history,
-                       sessionDirId: currentId(), resume: !!c.sessionId,
+                       sessionDirId: pendingId(), resume: !!c.sessionId,
                        ...rt, scratchDir: scratchDir(), useWorkflow: useWorkflow() }, handle);
   }
 }
