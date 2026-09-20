@@ -42,17 +42,30 @@ export async function saveNow() {
 
 /* Autosave is debounced, and deferred while a turn is running: renaming the folder
    out from under a running agent breaks the absolute paths it is holding. */
-let t = null, busy = false, pending = false;
+let t = null, busy = false, pending = false, scheduled = false;
 export function saveSoon() {
   clearTimeout(t);
-  t = setTimeout(() => { if (busy) { pending = true; return; } saveNow(); }, 800);
+  scheduled = true;
+  t = setTimeout(() => { scheduled = false; if (busy) { pending = true; return; } saveNow(); }, 800);
 }
 export function setTurnBusy(on) {
   busy = on;
   if (!on && pending) { pending = false; saveNow(); }
 }
 
+/* A debounce still outstanding (or deferred behind a busy turn) targets whoever
+   S.sessionDirId is RIGHT NOW. Call this before that changes, or the save either
+   never happens (the old session silently loses its last turn/rename) or fires
+   after the switch and re-saves the wrong, now-current session. */
+async function flushPending() {
+  if (!scheduled && !pending) return;
+  clearTimeout(t);
+  scheduled = false; pending = false;
+  await saveNow();
+}
+
 export async function openSessionById(id) {
+  await flushPending();                 // save whatever was pending for the OLD session first
   const r = await post('/api/sessions/open', { id });
   if (r.error) throw new Error(r.error);
   S.sessionDirId = r.id ?? id;

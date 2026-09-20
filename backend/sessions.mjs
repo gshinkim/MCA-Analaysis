@@ -93,7 +93,12 @@ export async function saveSession(runsRoot, { id, name, chats = [], settings = {
   const now = Date.now();
   await writeFile(join(dir, META), JSON.stringify(
     { name, created: prev?.created ?? now, updated: now, chats }, null, 2));
-  await writeFile(join(dir, 'model.txt'), model);
+  // An empty snapshot is sometimes just a bad read (the editor caught mid-clear), not a
+  // real "delete my model". Never let it clobber a real one that's already on disk — but
+  // an empty model still writes when there's no existing snapshot (a genuinely new,
+  // still-empty session).
+  const existingModel = await readFile(join(dir, 'model.txt'), 'utf8').catch(() => null);
+  if (model?.trim() || !existingModel?.trim()) await writeFile(join(dir, 'model.txt'), model);
   await writeFile(join(dir, 'settings.json'), JSON.stringify(settings, null, 2));
   return { id: finalId };
 }

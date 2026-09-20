@@ -332,6 +332,7 @@ export function initChat(){
   $('#openSession').onclick = async () => {
     const id = await pickSession();
     if(!id) return;
+    if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
     try { await openSessionById(id); }
     catch(e){ alert('Could not open that session: ' + e.message); }
   };
@@ -341,6 +342,7 @@ export function initChat(){
     if(!confirm('Delete this session?\n\nThis removes workspace/runs/' + id +
                 ' and everything in it — the conversation, the model snapshot and every '+
                 'file the AI wrote. This cannot be undone.')) return;
+    if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
     const r = await deleteCurrent();
     if(r.error) return alert('Could not delete: ' + r.error);
     loadChats([]);

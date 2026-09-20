@@ -21,15 +21,18 @@ export const steady   = q => post('/api/steady', q);
 export const settle   = q => post('/api/settle', q);
 export const mca      = q => post('/api/mca', q);
 
-/** One agent turn, streamed as server-sent events. Returns an abort function. */
-export function chat({ message, sessionId, model, env, runtime, chatCfg, useWorkflow, history }, onEvent){
+/** One agent turn, streamed as server-sent events. Returns an abort function.
+    Forwards the whole options object as-is — no per-field allowlist to fall out of
+    sync with what chat.mjs sends (sessionDirId, resume and scratchDir were dropped
+    this way once already). */
+export function chat(opts, onEvent){
   const ctrl = new AbortController();
   (async () => {
     let res;
     try{
       res = await fetch('/api/chat', { method:'POST', signal: ctrl.signal,
         headers:{'content-type':'application/json'},
-        body: JSON.stringify({ message, sessionId, model, env, runtime, chatCfg, useWorkflow, history }) });
+        body: JSON.stringify(opts) });
     }catch(e){
       if(e.name!=='AbortError') onEvent({type:'fatal', error:String(e.message||e)});
       return;

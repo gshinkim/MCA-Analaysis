@@ -192,4 +192,30 @@ console.log('sessions compaction ok');
 
 console.log('sessions rename ok');
 
+{
+  const { mkdtemp, mkdir, readFile: rf } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { saveSession } = await import('./sessions.mjs');
+
+  const runs = join(await mkdtemp(join(tmpdir(), 'mca-')), 'runs');
+  await mkdir(runs, { recursive: true });
+
+  // a real snapshot exists; a blank/whitespace-only model must not overwrite it
+  // (name equals the slugged id so saveSession takes no rename branch here)
+  await saveSession(runs, { id: 'proj', name: 'proj', chats: [], settings: {}, model: 'S1 -> S2; k*S1' });
+  await saveSession(runs, { id: 'proj', name: 'proj', chats: [], settings: {}, model: '' });
+  assert.equal(await rf(join(runs, 'proj/model.txt'), 'utf8'), 'S1 -> S2; k*S1',
+    'empty model must not clobber an existing snapshot');
+  await saveSession(runs, { id: 'proj', name: 'proj', chats: [], settings: {}, model: '   \n  ' });
+  assert.equal(await rf(join(runs, 'proj/model.txt'), 'utf8'), 'S1 -> S2; k*S1',
+    'whitespace-only model must not clobber an existing snapshot either');
+
+  // no snapshot yet: an empty model is the legitimate new-empty-session case and still writes
+  await saveSession(runs, { id: 'fresh', name: 'fresh', chats: [], settings: {}, model: '' });
+  assert.equal(await rf(join(runs, 'fresh/model.txt'), 'utf8'), '',
+    'empty model with no existing snapshot still creates the file');
+}
+
+console.log('sessions empty-model guard ok');
+
 console.log('sessions slug ok');
