@@ -99,4 +99,45 @@ console.log('sessions containment ok');
 
 console.log('sessions list/save ok');
 
+{
+  const { mkdtemp, mkdir, writeFile: wf, stat: st } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { openSession, deleteSession, saveSession } = await import('./sessions.mjs');
+
+  const base = await mkdtemp(join(tmpdir(), 'mca-'));
+  const runs = join(base, 'runs');
+  await mkdir(runs, { recursive: true });
+
+  await saveSession(runs, { id: 'demo', name: 'Demo', chats: [{ id: 1, title: 't' }],
+    settings: { start: 0, end: 5, points: 9 }, model: 'S1 -> S2; k*S1' });
+  await wf(join(runs, 'demo/summary.md'), 'Earlier: we found step 3 holds the control.');
+  await wf(join(runs, 'demo/scan.py'), 'print(1)');
+
+  const s = await openSession(runs, 'demo');
+  assert.equal(s.name, 'Demo');
+  assert.equal(s.model, 'S1 -> S2; k*S1');
+  assert.equal(s.settings.points, 9);
+  assert.equal(s.chats[0].title, 't');
+  assert.match(s.summary, /step 3/);
+
+  // a folder with only a session.json must still open
+  await mkdir(join(runs, 'bare'), { recursive: true });
+  await wf(join(runs, 'bare/session.json'), JSON.stringify({ name: 'Bare', chats: [] }));
+  const bare = await openSession(runs, 'bare');
+  assert.equal(bare.model, '');
+  assert.deepEqual(bare.settings, {});
+  assert.equal(bare.summary, '');
+
+  // delete takes the folder and its contents, and nothing else
+  await deleteSession(runs, 'demo');
+  assert.equal(await st(join(runs, 'demo')).catch(() => null), null, 'demo folder gone');
+  assert.ok(await st(join(runs, 'bare')).catch(() => null), 'bare folder untouched');
+
+  for (const bad of ['..', '../..', '/etc'])
+    await assert.rejects(() => deleteSession(runs, bad), /outside|empty/i, 'delete must reject ' + bad);
+  assert.ok(await st(runs).catch(() => null), 'runs/ itself survives');
+}
+
+console.log('sessions open/delete ok');
+
 console.log('sessions slug ok');

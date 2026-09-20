@@ -8,7 +8,7 @@
 export const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g, '').replace(/\s+/g, '-')
                                   .replace(/^[.\-]+|[.\-]+$/g, '').slice(0, 80);
 
-import { realpath, readFile, writeFile, mkdir, readdir, rename, stat } from 'node:fs/promises';
+import { realpath, readFile, writeFile, mkdir, readdir, rename, stat, rm } from 'node:fs/promises';
 import { resolve, sep, join } from 'node:path';
 
 /* A session id is a folder name derived from something the user typed, and
@@ -97,3 +97,28 @@ export async function saveSession(runsRoot, { id, name, chats = [], settings = {
   await writeFile(join(dir, 'settings.json'), JSON.stringify(settings, null, 2));
   return { id: finalId };
 }
+
+export const SUMMARY = 'summary.md';
+
+export async function openSession(runsRoot, id) {
+  const dir = await sessionDir(runsRoot, id);
+  const m = await readMeta(dir);          // no session.json means no session: let it throw
+  const read = (f, d) => readFile(join(dir, f), 'utf8').catch(() => d);
+  const settings = await read('settings.json', '{}');
+  return {
+    id, name: m.name ?? id, chats: m.chats ?? [],
+    model: await read('model.txt', ''),
+    summary: await read(SUMMARY, ''),
+    settings: (() => { try { return JSON.parse(settings); } catch { return {}; } })(),
+  };
+}
+
+export async function deleteSession(runsRoot, id) {
+  await rm(await sessionDir(runsRoot, id), { recursive: true, force: true });
+}
+
+export const readSummary = async dir => readFile(join(dir, SUMMARY), 'utf8').catch(() => '');
+export const writeSummary = async (dir, text) => {
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, SUMMARY), text);
+};
