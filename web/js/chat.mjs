@@ -43,6 +43,23 @@ export function replaySlice(log, cap = REPLAY_CAP){
   return { turns: turns.slice(-cap), skipped: turns.length - cap };
 }
 
+// A whole thinking block that merely repeats the deltas just streamed should be
+// suppressed. But each workflow phase reasons fresh and often opens with the
+// same boilerplate as an earlier phase — comparing against the WHOLE turn's
+// `thoughts` buffer would silently drop a genuinely new block over a shared
+// opening. Scope the check to the text since the last "— phase —" separator
+// (or the whole buffer, for the turn's first phase), i.e. what "immediately
+// preceded" this block. Pure so it can be unit-tested without a DOM.
+export function isEchoedThought(thoughts, text){
+  const t = (text || '').trim();
+  if(!t) return false;
+  const buf = thoughts || '';
+  const sep = /\n\n— [^\n]+ —\n/g;
+  let recentStart = 0, m;
+  while((m = sep.exec(buf))) recentStart = m.index + m[0].length;
+  return buf.slice(recentStart).includes(t.slice(0, 60));
+}
+
 export function loadChats(saved){
   chats.forEach(c => c.thread.remove());
   chats.length = 0; active = null;
@@ -217,8 +234,8 @@ function send(){
         think.hidden=false; tkBody.textContent=thoughts; return;
       }
       if(ev.type==='thinking'){
-        // a whole block repeats what the deltas already streamed
-        if(ev.whole && thoughts.includes(ev.text.trim().slice(0,60))) return;
+        // a whole block repeats what the deltas already streamed this phase
+        if(ev.whole && isEchoedThought(thoughts, ev.text)) return;
         if(ev.tools) ev.tools.forEach(t=>addTool(t));
         // streamed deltas concatenate; only whole blocks get a separator, or every
         // token lands on its own line

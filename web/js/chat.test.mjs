@@ -2,7 +2,7 @@
    No DOM: pins the replay-cap decision loadChats uses to bound how many turns
    of a restored session get rendered (the DOM-touching part can't run here). */
 import assert from 'node:assert/strict';
-import { replaySlice, REPLAY_CAP } from './chat.mjs';
+import { replaySlice, REPLAY_CAP, isEchoedThought } from './chat.mjs';
 
 const turn = n => ({ q: 'q'+n, a: 'a'+n });
 
@@ -40,6 +40,39 @@ const turn = n => ({ q: 'q'+n, a: 'a'+n });
   const { turns, skipped } = replaySlice(log);
   assert.equal(turns.length, REPLAY_CAP);
   assert.equal(skipped, 5);
+}
+
+{
+  // a whole block that merely repeats the deltas just streamed (same round,
+  // no phase separator since) IS suppressed — the original de-dup purpose
+  const delta = 'Let me think about this step by step while examining the pathway for phase one context and enzyme details.';
+  const thoughts = delta;
+  assert.equal(isEchoedThought(thoughts, delta), true);
+}
+
+{
+  // a new block that only SHARES ITS OPENING 60 CHARS with reasoning from an
+  // EARLIER phase (before the last "— phase —" separator) must NOT be
+  // suppressed — that's the bug: it used to compare against the whole turn
+  const opening = 'Let me think about this step by step while examining the pathway';
+  const phase1Whole = opening + ' for phase one context and enzyme details.';
+  const phase2Delta = 'Looking at the flux control coefficients now for this new phase.';
+  const thoughts = phase1Whole + '\n\n— Phase 2 —\n' + phase2Delta;
+  const phase2NewWhole = opening + ' but now for phase two with an entirely different focus.';
+  assert.equal(isEchoedThought(thoughts, phase2NewWhole), false);
+}
+
+{
+  // empty/whitespace input never crashes, and is never treated as an echo
+  assert.doesNotThrow(() => isEchoedThought('', ''));
+  assert.doesNotThrow(() => isEchoedThought('some thoughts', '   '));
+  assert.equal(isEchoedThought('some thoughts', ''), false);
+  assert.equal(isEchoedThought('some thoughts', '   '), false);
+}
+
+{
+  // first block of the turn, thoughts still empty: never suppressed
+  assert.equal(isEchoedThought('', 'Let me think about this step by step.'), false);
 }
 
 console.log('chat replay-cap ok');
