@@ -413,3 +413,10 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 /* One conversation per thread; only the active one is in the flow. */
 #msgs>.thread{display:flex;flex-direction:column;gap:12px}
 #chat .hd #chatPick{max-width:150px;font-weight:600}
+
+/* --- session picker: the file picker's box with a search row --- */
+.sp-q{flex:1;background:var(--bg);color:var(--ink);border:1px solid var(--border);
+  border-radius:7px;padding:6px 9px;font:13px inherit;outline:none}
+.sp-q:focus{box-shadow:0 0 0 2px var(--accent);border-color:transparent}
+.sp-when{font-size:11px;color:var(--muted);flex:none;font-variant-numeric:tabular-nums}
+.fp-row.sel .sp-when{color:var(--accent-ink);opacity:.8}
