@@ -33,6 +33,16 @@ const cur = () => chats.find(c => c.id === active);
 export const dumpChats = () => chats.map(({ id, title, history, sessionId, log, summary }) =>
   ({ id, title, history, sessionId, log, summary }));
 
+// Replaying a session re-parses markdown and builds DOM for every turn ever logged
+// (log, unlike history, is never trimmed). Cap what gets REPLAYED on open; the full
+// log stays on disk for export. Pure so it can be unit-tested without a DOM.
+export const REPLAY_CAP = 20;
+export function replaySlice(log, cap = REPLAY_CAP){
+  const turns = log ?? [];
+  if(turns.length <= cap) return { turns, skipped: 0 };
+  return { turns: turns.slice(-cap), skipped: turns.length - cap };
+}
+
 export function loadChats(saved){
   chats.forEach(c => c.thread.remove());
   chats.length = 0; active = null;
@@ -42,7 +52,14 @@ export function loadChats(saved){
     $('#msgs').append(thread);
     chats.push({ ...s, thread });
     seq = Math.max(seq, s.id ?? 0);
-    for(const turn of s.log ?? []){
+    const { turns, skipped } = replaySlice(s.log);
+    if(skipped){
+      const m = document.createElement('div'); m.className = 'meta';
+      m.textContent = skipped + (skipped === 1 ? ' earlier turn is' : ' earlier turns are') +
+                      ' not shown here — still in the full log this chat exports.';
+      thread.append(m);
+    }
+    for(const turn of turns){
       const d = document.createElement('div'); d.className = 'msg me';
       d.textContent = turn.q; thread.append(d);
       const a = document.createElement('div'); a.className = 'msg ai';
