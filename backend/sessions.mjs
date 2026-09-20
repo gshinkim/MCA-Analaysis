@@ -7,3 +7,38 @@
     backend/sessions.test.mjs pins the two together. */
 export const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g, '').replace(/\s+/g, '-')
                                   .replace(/^[.\-]+|[.\-]+$/g, '').slice(0, 80);
+
+import { realpath } from 'node:fs/promises';
+import { resolve, sep } from 'node:path';
+
+/* A session id is a folder name derived from something the user typed, and
+   deleteSession() removes a tree. Resolve it and prove it is inside runs/ before
+   anything touches the filesystem — including through a symlink, which resolve()
+   alone does not see.
+
+   The root itself is realpathed first, not just the candidate: on macOS tmpdir()
+   lives under /var, which is itself a symlink to /private/var, so a non-realpathed
+   root would reject every legitimate path underneath it.
+
+   slug() already strips most traversal (slug('..') is '', slug('a/../../b')
+   collapses to something with no '/' left in it), so a slugged name alone can
+   never resolve outside root — it silently maps a traversal attempt onto some
+   other, harmless folder instead of rejecting it. The raw id is checked too, so
+   an id that reads like an escape attempt is refused outright rather than quietly
+   redirected. Belt (raw-id check) and suspenders (slugged-name check). */
+export async function sessionDir(runsRoot, id) {
+  const name = slug(id);
+  if (!name) throw new Error('empty session name');
+  const root = await realpath(runsRoot).catch(() => resolve(runsRoot));
+
+  const rawDir = resolve(root, String(id));
+  if (rawDir === root || !(rawDir + sep).startsWith(root + sep))
+    throw new Error('session path outside runs/');
+
+  const dir = resolve(root, name);
+  if (dir === root || !dir.startsWith(root + sep)) throw new Error('session path outside runs/');
+  // an existing entry may be a symlink out of the tree; a missing one cannot be
+  const real = await realpath(dir).catch(() => null);
+  if (real && real !== dir && !real.startsWith(root + sep)) throw new Error('session path outside runs/');
+  return dir;
+}
