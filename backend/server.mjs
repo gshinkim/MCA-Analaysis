@@ -10,7 +10,8 @@ import { runAgent, toUiEvent } from './agent.mjs';
 import { runLocalAgent, Chat } from './local-agent.mjs';
 import { homedir } from 'node:os';
 import { listSessions, saveSession, openSession, deleteSession,
-         sessionDir, readSummary, writeSummary, splitHistory, summaryPrompt } from './sessions.mjs';
+         sessionDir, readSummary, writeSummary, splitHistory, summaryPrompt,
+         summaryStrategy, renderRecord, trimRecord, appendThinking } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -324,29 +325,49 @@ const routes = {
     const send = o => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(o)}\n\n`); };
     const ka = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
 
+    // Accumulated across the whole turn, written to thinking.md when it ends. Mirrors
+    // the dedup web/js/chat.mjs does for the same whole-vs-delta duplication: a
+    // whole-block re-send (Claude Code's final assistant message) repeats what the
+    // deltas already streamed, so drop it rather than doubling the text on disk.
+    let thoughts = '';
+
     const onEvent = async raw => {
         const ev = runtime === 'openai' ? raw : toUiEvent(raw);
         if (ev) send(ev);
+        if (ev?.type === 'thinking' && ev.text &&
+            !(ev.whole && thoughts.includes(ev.text.trim().slice(0, 60))))
+          thoughts += (ev.whole && thoughts && !thoughts.endsWith('\n') ? '\n\n' : '') + ev.text;
         if (raw.type === 'done') {
           // compare content, not mtime — the editor autosaves during a turn
           const after = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
           if (after !== before) send({ type: 'model_changed', src: after, version: await modelVersion() });
 
-          /* Roll the memory forward: anything past the newest twelve messages is
-             folded into summary.md by whichever model the user is already using, so
-             turn 1 still exists at turn 90. One cheap call per twelve turns. */
-          if (sdir && runtime === 'openai' && (history?.length ?? 0) > 12) {
-            const { fold } = splitHistory(history);
-            if (fold.length) try {
-              const chat = new Chat(chatCfg);
-              const msg = await chat.complete({ messages: summaryPrompt(summary, fold),
-                                                maxTokens: 900 });
-              if (msg.content?.trim()) {
-                await writeSummary(sdir, msg.content.trim());
-                send({ type: 'compacted', summary: msg.content.trim() });
+          /* summary.md is written every turn a session folder exists, for every
+             runtime: short history is a plain running record (no model call); long
+             history compresses through the model already in use when there's a
+             cheap completion endpoint for it (OpenAI-compatible), otherwise (Claude
+             Code) a bounded record so the file can't grow without limit. */
+          if (sdir) try {
+            const strategy = summaryStrategy(history?.length, runtime === 'openai' && !!chatCfg);
+            if (strategy === 'compress') {
+              const { fold } = splitHistory(history);
+              if (fold.length) {
+                const chat = new Chat(chatCfg);
+                const msg = await chat.complete({ messages: summaryPrompt(summary, fold),
+                                                  maxTokens: 900 });
+                if (msg.content?.trim()) {
+                  await writeSummary(sdir, msg.content.trim());
+                  send({ type: 'compacted', summary: msg.content.trim() });
+                }
               }
-            } catch (e) { console.error('[compact]', e.message); }  // never fail the turn
-          }
+            } else {
+              await writeSummary(sdir, strategy === 'trim' ? trimRecord(history) : renderRecord(history));
+            }
+          } catch (e) { console.error('[summary]', e.message); }  // never fail the turn
+
+          // Same rule: persisting the turn's reasoning must never fail the turn.
+          if (sdir && thoughts.trim()) try { await appendThinking(sdir, message, thoughts); }
+          catch (e) { console.error('[thinking]', e.message); }
 
           clearInterval(ka);
           if (!res.writableEnded) res.end();

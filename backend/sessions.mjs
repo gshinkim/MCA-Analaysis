@@ -8,7 +8,7 @@
 export const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g, '').replace(/\s+/g, '-')
                                   .replace(/^[.\-]+|[.\-]+$/g, '').slice(0, 80);
 
-import { realpath, readFile, writeFile, mkdir, readdir, rename, stat, rm } from 'node:fs/promises';
+import { realpath, readFile, writeFile, appendFile, mkdir, readdir, rename, stat, rm } from 'node:fs/promises';
 import { resolve, sep, join } from 'node:path';
 
 /* A session id is a folder name derived from something the user typed, and
@@ -128,6 +128,32 @@ export const writeSummary = async (dir, text) => {
   await writeFile(join(dir, SUMMARY), text);
 };
 
+export const THINKING = 'thinking.md';
+// Chars of reasoning kept per turn. Bounds a runaway reasoning model — not a token
+// budget, just a ceiling so one turn can't write an unbounded file to disk.
+export const THINK_CAP = 8000;
+
+/** One turn's block for thinking.md: a heading naming the turn (timestamp + the
+    user's prompt, trimmed), then the model's reasoning, capped. Pure — no I/O —
+    so the cap and formatting are testable without a filesystem. */
+export function renderThinking(prompt, text, cap = THINK_CAP, now = () => new Date()) {
+  const body = String(text ?? '').trim();
+  if (!body) return '';
+  const clipped = body.length > cap
+    ? body.slice(0, cap) + `\n\n_(truncated at ${cap} characters)_` : body;
+  const p = String(prompt ?? '').trim().replace(/\s+/g, ' ').slice(0, 120) || '(no prompt)';
+  return `## ${now().toISOString()} — ${p}\n\n${clipped}\n`;
+}
+
+/** Append one turn's thinking to thinking.md. Never throws into the caller's turn
+    on its own — server.mjs still wraps this the way it wraps writeSummary. */
+export async function appendThinking(dir, prompt, text, cap = THINK_CAP) {
+  const block = renderThinking(prompt, text, cap);
+  if (!block) return;
+  await mkdir(dir, { recursive: true });
+  await appendFile(join(dir, THINKING), block + '\n');
+}
+
 export const KEEP = 12;
 
 /** Newest `keep` messages stay; everything older is what gets folded into the summary. */
@@ -135,6 +161,39 @@ export function splitHistory(history, keep = KEEP) {
   const h = history ?? [];
   if (h.length <= keep) return { fold: [], recent: h.slice() };
   return { fold: h.slice(0, h.length - keep), recent: h.slice(h.length - keep) };
+}
+
+/** Plain, no-model record of a conversation: every message, oldest first, no
+    compression. Cheap enough to write on every turn — this is what summary.md
+    gets when there's nothing worth spending a model call on yet, or no cheap
+    completion endpoint to spend it on (the Claude Code runtime). */
+export function renderRecord(history) {
+  return (history ?? []).map(m => `**${m.role}:** ${m.content}`).join('\n\n');
+}
+
+/** Same record, but bounded: the newest `keep` messages verbatim, older ones
+    collapsed to a one-line count. Used on a long conversation when there's no
+    cheap completion endpoint to compress it (Claude Code) — the alternative,
+    shelling out to `claude -p` for a compression pass, costs a whole extra
+    agent turn per twelve messages, so we trim instead of compress. */
+export function trimRecord(history, keep = KEEP) {
+  const h = history ?? [];
+  if (h.length <= keep) return renderRecord(h);
+  const dropped = h.length - keep;
+  return `_(${dropped} earlier message${dropped === 1 ? '' : 's'} omitted — this runtime ` +
+    `has no cheap compression step)_\n\n` + renderRecord(h.slice(h.length - keep));
+}
+
+/** What summary.md should get this turn:
+    - 'record'   — short history, any runtime: plain record, no model call.
+    - 'compress' — long history, a runtime with a cheap completion endpoint
+                   (OpenAI-compatible, chatCfg usable): the existing
+                   summaryPrompt/Chat.complete compaction.
+    - 'trim'     — long history, no cheap completion endpoint (Claude Code):
+                   bounded plain record instead. */
+export function summaryStrategy(historyLength, canCompress) {
+  if ((historyLength ?? 0) <= KEEP) return 'record';
+  return canCompress ? 'compress' : 'trim';
 }
 
 /* Carrying the previous summary back in is the whole point: each pass compresses

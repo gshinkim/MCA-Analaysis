@@ -218,4 +218,72 @@ console.log('sessions rename ok');
 
 console.log('sessions empty-model guard ok');
 
+{
+  const { summaryStrategy, renderRecord, trimRecord, KEEP } = await import('./sessions.mjs');
+  const msgs = n => Array.from({ length: n }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user',
+                                                           content: 'm' + i }));
+
+  // short history, any runtime: a plain record, no model call is even reachable
+  assert.equal(summaryStrategy(0, false), 'record');
+  assert.equal(summaryStrategy(KEEP, true), 'record');
+  assert.equal(summaryStrategy(KEEP, false), 'record');
+
+  // long history + a runtime with a cheap completion endpoint: compress
+  assert.equal(summaryStrategy(KEEP + 1, true), 'compress');
+
+  // long history + no cheap completion endpoint (Claude Code): trimmed record
+  assert.equal(summaryStrategy(KEEP + 1, false), 'trim');
+
+  // renderRecord: every message present, nothing summarised away
+  const rec = renderRecord(msgs(5));
+  for (let i = 0; i < 5; i++) assert.match(rec, new RegExp('m' + i));
+  assert.equal(renderRecord([]), '');
+  // this is what would fail if renderRecord degenerated into a no-op: an empty
+  // record for a non-empty history would silently lose the conversation
+  assert.notEqual(renderRecord(msgs(3)), '');
+
+  // trimRecord: short history is untouched (same as renderRecord)
+  assert.equal(trimRecord(msgs(KEEP), KEEP), renderRecord(msgs(KEEP)));
+
+  // trimRecord: long history is bounded — the whole point of 'trim' over
+  // 'record' on a long Claude Code conversation. Fails if trimRecord just
+  // called renderRecord on everything (no bound at all).
+  const big = msgs(500);
+  const full = renderRecord(big);
+  const trimmed = trimRecord(big, KEEP);
+  assert.ok(trimmed.length < full.length, 'trim must be shorter than the untrimmed record');
+  assert.ok(trimmed.length < 4000, 'trim must not grow with history length');
+  assert.match(trimmed, /m499/, 'newest message survives untrimmed');
+  assert.doesNotMatch(trimmed, /\bm0\b/, 'oldest message is the one dropped');
+  assert.match(trimmed, /488 earlier messages omitted/);
+}
+
+console.log('sessions summary strategy ok');
+
+{
+  const { renderThinking, THINK_CAP } = await import('./sessions.mjs');
+
+  // no text: nothing to write, caller skips the append entirely
+  assert.equal(renderThinking('prompt', ''), '');
+  assert.equal(renderThinking('prompt', '   '), '');
+
+  const now = () => new Date('2026-09-20T12:00:00.000Z');
+  const block = renderThinking('What does step 3 control?', 'Because k2 is saturated...', 200, now);
+  assert.match(block, /2026-09-20T12:00:00\.000Z/);
+  assert.match(block, /What does step 3 control\?/);
+  assert.match(block, /Because k2 is saturated/);
+
+  // the cap actually bounds a runaway reasoning model's output
+  const huge = 'x'.repeat(50000);
+  const capped = renderThinking('p', huge, 1000, now);
+  assert.ok(capped.length < 1200, 'capped block must stay near the cap, not grow with input');
+  assert.match(capped, /truncated at 1000 characters/);
+
+  // default cap applies when the caller does not pass one
+  const defCapped = renderThinking('p', 'y'.repeat(THINK_CAP * 3), undefined, now);
+  assert.ok(defCapped.length < THINK_CAP * 2, 'default cap must also bound the output');
+}
+
+console.log('sessions thinking ok');
+
 console.log('sessions slug ok');
