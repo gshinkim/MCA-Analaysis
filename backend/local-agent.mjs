@@ -222,7 +222,7 @@ async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
     // Ask for the schema only once the model has stopped calling tools; many local
     // models cannot emit a tool call and a constrained JSON object in one turn.
     const m = await chat.complete({ messages, tools: wrapUp ? undefined : tools.defs, signal,
-      onStream: ev => { if (ev.type === 'thinking') emit(ev); } });
+      onStream: ev => { if (ev.type === 'thinking' || ev.type === 'unthink') emit(ev); } });
     messages.push(forHistory(m));
     const calls = m.tool_calls ?? [];
     if (!calls.length) {
@@ -249,7 +249,7 @@ async function constrain({ chat, messages, schema, emit, signal }) {
     'Now output ONLY a JSON object matching the required schema for this stage. No prose, no code fences.' };
   for (let attempt = 0; attempt < 3; attempt++) {
     let m;
-    const quiet = { onStream: ev => { if (ev.type === 'thinking') emit(ev); } };
+    const quiet = { onStream: ev => { if (ev.type === 'thinking' || ev.type === 'unthink') emit(ev); } };
     try { m = await chat.complete({ messages: [...messages, ask], schema, signal, ...quiet }); }
     catch (e) {
       if (e?.name === 'AbortError') throw e;
