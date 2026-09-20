@@ -388,4 +388,105 @@ console.log('sessions buildTurn ok');
 
 console.log('sessions trim-strategy no-overlap ok');
 
+{
+  // DEFECT 1 — the placeholder guard must be case/whitespace-insensitive, not an
+  // exact string match against DEFAULT_NAME. A name that is semantically still
+  // "the unnamed placeholder" (different case, or padded with whitespace) must
+  // not trigger a folder rename; a genuinely new name still must.
+  const { mkdtemp, mkdir, stat: st } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { saveSession } = await import('./sessions.mjs');
+
+  const runs = join(await mkdtemp(join(tmpdir(), 'mca-')), 'runs');
+  await mkdir(runs, { recursive: true });
+
+  await saveSession(runs, { id: '2026-09-20', name: 'Untitled project',
+    chats: [], settings: {}, model: 'm' });
+
+  const lower = await saveSession(runs, { id: '2026-09-20', name: 'untitled project',
+    chats: [], settings: {}, model: 'm' });
+  assert.equal(lower.id, '2026-09-20', 'lowercase placeholder must not rename the folder');
+  assert.equal(await st(join(runs, 'Untitled-project')).catch(() => null), null,
+    'no rename must have happened for lowercase placeholder');
+
+  const padded = await saveSession(runs, { id: '2026-09-20', name: ' Untitled project ',
+    chats: [], settings: {}, model: 'm' });
+  assert.equal(padded.id, '2026-09-20', 'padded placeholder must not rename the folder');
+  assert.equal(await st(join(runs, 'Untitled-project')).catch(() => null), null,
+    'no rename must have happened for padded placeholder');
+
+  const real = await saveSession(runs, { id: '2026-09-20', name: 'Glycolysis v2',
+    chats: [], settings: {}, model: 'm' });
+  assert.equal(real.id, 'Glycolysis-v2', 'a genuinely new name must still rename the folder');
+}
+
+console.log('sessions placeholder guard ok');
+
+{
+  // DEFECT 2 — TOCTOU between freeId's stat check and the caller's rename/mkdir.
+  // Simulate the chosen id being taken between the check and the use: saveSession
+  // must retry onto the next free id rather than throwing EEXIST/ENOTEMPTY.
+  const { mkdtemp, mkdir } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { saveSession } = await import('./sessions.mjs');
+
+  const runs = join(await mkdtemp(join(tmpdir(), 'mca-')), 'runs');
+  await mkdir(runs, { recursive: true });
+
+  // Two already-saved sessions, both about to be renamed to the same new name
+  // at (near) the same time. freeId's stat check happens for both before either
+  // has claimed the name — this IS the TOCTOU window from the defect report:
+  // both see 'Glycolysis-v2' as free, both attempt to claim it, and whichever
+  // loses the race must retry onto the next free id rather than throwing
+  // EEXIST/ENOTEMPTY out of saveSession.
+  await saveSession(runs, { id: 'a', name: 'a', chats: [], settings: {}, model: 'm' });
+  await saveSession(runs, { id: 'b', name: 'b', chats: [], settings: {}, model: 'm' });
+
+  const [ra, rb] = await Promise.all([
+    saveSession(runs, { id: 'a', name: 'Glycolysis v2', chats: [], settings: {}, model: 'm' }),
+    saveSession(runs, { id: 'b', name: 'Glycolysis v2', chats: [], settings: {}, model: 'm' }),
+  ]);
+  assert.notEqual(ra.id, rb.id, 'two concurrent renames to the same name must not collide');
+  assert.deepEqual([ra.id, rb.id].sort(), ['Glycolysis-v2', 'Glycolysis-v2-2'],
+    'the loser of the race must land on the next free id, not throw');
+}
+
+console.log('sessions rename retry ok');
+
+{
+  // DEFECT 3 — thinking.md must be bounded across the whole file, not just per
+  // block. Append enough blocks to exceed the cap and assert: the file stays
+  // under the cap, the newest block survives in full, the oldest is gone, no
+  // block is cut mid-way, and the "earlier reasoning dropped" note appears
+  // exactly once even after repeated trims.
+  const { mkdtemp, mkdir, readFile: rf } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { appendThinking, THINKING } = await import('./sessions.mjs');
+
+  const runs = join(await mkdtemp(join(tmpdir(), 'mca-')), 'runs');
+  const dir = join(runs, 'demo');
+  await mkdir(dir, { recursive: true });
+
+  const totalCap = 5000; // small total-file cap so the test doesn't need thousands of appends
+  const now = i => () => new Date(Date.UTC(2026, 8, 20, 12, i));
+  // each block is a few hundred chars; append enough to exceed `totalCap` several times over
+  for (let i = 0; i < 40; i++)
+    await appendThinking(dir, 'turn ' + i, 'reasoning '.repeat(30), undefined, totalCap, now(i));
+
+  const text = await rf(join(dir, THINKING), 'utf8');
+  assert.ok(text.length <= totalCap * 1.2, 'file must stay bounded near the cap, not grow unboundedly: ' + text.length);
+  assert.match(text, /turn 39/, 'the newest block must survive in full');
+  assert.doesNotMatch(text, /turn 0\b/, 'the oldest block must have been dropped');
+  // no block cut mid-way: every remaining '## ' heading must be followed by a
+  // complete block ending before the next heading or EOF — approximate by
+  // checking headings and bodies pair up (no heading with no reasoning text after it)
+  const blocks = text.split(/(?=^## )/m).filter(b => b.trim());
+  for (const b of blocks.filter(b => b.startsWith('## ')))
+    assert.match(b, /reasoning( reasoning)*/, 'block must not be cut mid-way: ' + b.slice(0, 60));
+  const dropNotes = text.match(/earlier reasoning was dropped/gi) ?? [];
+  assert.equal(dropNotes.length, 1, 'the drop note must appear exactly once, not duplicated on every trim');
+}
+
+console.log('sessions thinking cap ok');
+
 console.log('sessions slug ok');

@@ -8,7 +8,7 @@
 export const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g, '').replace(/\s+/g, '-')
                                   .replace(/^[.\-]+|[.\-]+$/g, '').slice(0, 80);
 
-import { realpath, readFile, writeFile, appendFile, mkdir, readdir, rename, stat, rm } from 'node:fs/promises';
+import { realpath, readFile, writeFile, mkdir, readdir, rename, stat, rm } from 'node:fs/promises';
 import { resolve, sep, join } from 'node:path';
 
 /* A session id is a folder name derived from something the user typed, and
@@ -60,12 +60,30 @@ export async function listSessions(runsRoot) {
   return out.sort((a, b) => b.updated - a.updated);
 }
 
-/** First free folder name for `want`, ignoring `keep` (the folder being renamed). */
-async function freeId(runsRoot, want, keep) {
+/** Claim a free folder name for `want`, retrying past any that turn out to be
+    taken. A cheap stat-then-use split (check "is it free", then separately
+    rename/mkdir into it) leaves a TOCTOU window: another save can claim the
+    name in between, and the rename/mkdir then fails with EEXIST/ENOTEMPTY.
+    Closing that window by *retrying the actual claim on failure* — rather
+    than trusting an earlier check — means a race is handled no differently
+    than an ordinary pre-existing collision. `keep` is the folder already
+    being renamed: if a generated candidate coincides with it, that's a
+    no-op, not a collision. `srcDir` is renamed in if it exists on disk (an
+    already-saved session); a session that was never saved claims the target
+    directly via mkdir. */
+async function claimId(runsRoot, want, keep, srcDir) {
+  const srcExists = !!(await stat(srcDir).catch(() => null));
   for (let n = 1; n < 1000; n++) {
     const id = n === 1 ? want : `${want}-${n}`;
-    if (id === keep) return id;
-    if (!await stat(join(runsRoot, id)).catch(() => null)) return id;
+    if (id === keep) return { id, dir: srcDir };
+    const target = await sessionDir(runsRoot, id);
+    try {
+      if (srcExists) await rename(srcDir, target); else await mkdir(target);
+      return { id, dir: target };
+    } catch (err) {
+      if (err.code === 'EEXIST' || err.code === 'ENOTEMPTY') continue; // taken since the check — try the next id
+      throw err;
+    }
   }
   throw new Error('too many sessions named ' + want);
 }
@@ -74,6 +92,11 @@ async function freeId(runsRoot, want, keep) {
 // (web/js/main.mjs PROJ_DEF); a session still carrying it should keep its
 // date-stamped id rather than being renamed to a folder called Untitled-project
 const DEFAULT_NAME = 'Untitled project';
+// case/whitespace-insensitive: 'untitled project', 'Untitled Project' and
+// ' Untitled project ' are all still semantically the unnamed placeholder even
+// though saveSession is a server API and nothing guarantees the frontend's
+// exact casing/trim reaches it
+const isPlaceholder = name => String(name ?? '').trim().toLowerCase() === DEFAULT_NAME.toLowerCase();
 
 export async function saveSession(runsRoot, { id, name, chats = [], settings = {}, model = '' }) {
   let dir = await sessionDir(runsRoot, id);
@@ -82,11 +105,10 @@ export async function saveSession(runsRoot, { id, name, chats = [], settings = {
   // the project name is the folder name; a rename moves the folder with it
   const want = slug(name) || id;
   let finalId = id;
-  if (name !== DEFAULT_NAME && want !== id) {
-    finalId = await freeId(runsRoot, want, id);
-    const target = await sessionDir(runsRoot, finalId);
-    if (await stat(dir).catch(() => null)) await rename(dir, target);
-    dir = target;
+  if (!isPlaceholder(name) && want !== id) {
+    const claim = await claimId(runsRoot, want, id, dir);
+    finalId = claim.id;
+    dir = claim.dir;
   }
 
   await mkdir(dir, { recursive: true });
@@ -132,6 +154,38 @@ export const THINKING = 'thinking.md';
 // Chars of reasoning kept per turn. Bounds a runaway reasoning model — not a token
 // budget, just a ceiling so one turn can't write an unbounded file to disk.
 export const THINK_CAP = 8000;
+// Chars kept for the WHOLE file. Without this, appendFile grows thinking.md by up
+// to THINK_CAP every single turn forever. 200,000 is ~25 turns at the per-turn cap
+// — enough that a human reviewing a session still finds real recent context, small
+// enough that opening the file in an editor stays instant.
+export const THINKING_TOTAL_CAP = 200_000;
+
+const DROPPED_NOTE = '_(earlier reasoning was dropped to keep this file bounded)_\n\n';
+
+/** Split thinking.md's text into its `## <timestamp> — <prompt>` blocks (the
+    heading renderThinking emits), each running up to the next heading or EOF.
+    Strips the dropped-note line first, if present, so it is never mistaken
+    for part of a block. Pure — no I/O. */
+function thinkingBlocks(text) {
+  const body = text.startsWith(DROPPED_NOTE) ? text.slice(DROPPED_NOTE.length) : text;
+  return body.split(/(?=^## )/m).filter(b => b.trim());
+}
+
+/** Bound thinking.md to `cap` total characters by dropping the OLDEST whole
+    blocks — never the newest (`newBlock`, always kept in full even if that
+    alone exceeds `cap`), never mid-block. Once anything has ever been
+    dropped, a note is kept at the top saying so — recomputed fresh each
+    call, so it is never duplicated by repeated trims. Pure — no I/O. */
+export function boundThinking(existingText, newBlock, cap = THINKING_TOTAL_CAP) {
+  const had = String(existingText ?? '').startsWith(DROPPED_NOTE);
+  const blocks = [...thinkingBlocks(existingText ?? ''), newBlock];
+  let noteNeeded = had;
+  while (blocks.length > 1 && blocks.join('').length + (noteNeeded ? DROPPED_NOTE.length : 0) > cap) {
+    blocks.shift();
+    noteNeeded = true;
+  }
+  return (noteNeeded ? DROPPED_NOTE : '') + blocks.join('');
+}
 
 /** One turn's block for thinking.md: a heading naming the turn (timestamp + the
     user's prompt, trimmed), then the model's reasoning, capped. Pure — no I/O —
@@ -145,13 +199,17 @@ export function renderThinking(prompt, text, cap = THINK_CAP, now = () => new Da
   return `## ${now().toISOString()} — ${p}\n\n${clipped}\n`;
 }
 
-/** Append one turn's thinking to thinking.md. Never throws into the caller's turn
-    on its own — server.mjs still wraps this the way it wraps writeSummary. */
-export async function appendThinking(dir, prompt, text, cap = THINK_CAP) {
-  const block = renderThinking(prompt, text, cap);
+/** Append one turn's thinking to thinking.md, then bound the WHOLE file to
+    `totalCap`, dropping the oldest blocks first (see boundThinking). Never
+    throws into the caller's turn on its own — server.mjs still wraps this the
+    way it wraps writeSummary. */
+export async function appendThinking(dir, prompt, text, cap = THINK_CAP,
+                                      totalCap = THINKING_TOTAL_CAP, now = () => new Date()) {
+  const block = renderThinking(prompt, text, cap, now);
   if (!block) return;
   await mkdir(dir, { recursive: true });
-  await appendFile(join(dir, THINKING), block + '\n');
+  const existing = await readFile(join(dir, THINKING), 'utf8').catch(() => '');
+  await writeFile(join(dir, THINKING), boundThinking(existing, block + '\n', totalCap));
 }
 
 export const KEEP = 12;
