@@ -25,6 +25,11 @@ Simulation settings the user has set live in workspace/settings.json
 
 Tellurium is installed at ./.venv/bin/python (tellurium, roadrunner, numpy, scipy).
 Always invoke it as ./.venv/bin/python - the system python3 does NOT have tellurium.
+Running it is pre-approved, whether or not the workflow is on. Write the script with
+the Write tool, then run it as one plain command: ./.venv/bin/python <script>. No
+heredocs, no \`cat >\`, no chains of commands - a long compound command is refused as
+a whole even though every part of it is allowed. If a run was denied earlier in this
+conversation, that was the command's shape, not Tellurium: retry in this shape.
 
 Route every analysis through the ${WORKFLOW} workflow, per your agent definition.
 
@@ -83,11 +88,21 @@ create belongs anywhere else. Write to it by absolute path. It is the user's fol
 so leave it readable: name files for what they are, not run-1234567890.py.
 The live model stays at workspace/model.txt - that one is still edited in place.`;
 
-export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow = true,
-                          liveModel = '', scratch = '', onEvent }) {
-  const resuming = !!sessionId && STARTED.has(sessionId);
-  const sid = resuming ? sessionId : randomUUID();
-  STARTED.add(sid);
+/* The rolling memory of everything older than the last twelve messages. Inlined
+   rather than pointed at: a model that has to call a tool to find its own memory
+   is a model that will sometimes not bother. */
+export const summaryBlock = text => !text?.trim() ? '' : `
+
+## What happened earlier in this session
+
+This is your own compressed record of the turns before the ones you can see.
+Treat it as established, and do not re-derive it.
+
+${text.trim()}
+`;
+
+export function buildArgs({ root, prompt, sid, resuming, model, useWorkflow = true,
+                            liveModel = '', scratch = '', summary = '' }) {
   const args = [
     '-p', prompt,
     '--agent', AGENT,
@@ -105,14 +120,32 @@ export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow
     '--allowedTools',
     'Skill', ...(useWorkflow ? ['Workflow'] : []), 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite',
     'Bash(./.venv/bin/python:*)', 'Bash(.venv/bin/python:*)', 'Bash(cat:*)', 'Bash(ls:*)',
+    // The agent writes scripts to the working folder by absolute path, so it runs the
+    // venv by absolute path too — often after a `cd`. A plain absolute-path rule never
+    // matches (the path is quoted: spaces, parentheses); the leading * does.
+    `Bash(*${root}/.venv/bin/python*)`,
     '--append-system-prompt', SYSTEM_APPEND + (scratch ? scratchBlock(scratch) : '') +
-                              liveModelBlock(liveModel) +
+                              liveModelBlock(liveModel) + summaryBlock(summary) +
                               (useWorkflow ? '' : '\n\n' + NO_WORKFLOW),
     '--settings', JSON.stringify({ enableWorkflows: useWorkflow }),
     '--add-dir', root,
     ...(scratch && !scratch.startsWith(root) ? ['--add-dir', scratch] : []),
   ];
   if (model) args.push('--model', model);
+  return args;
+}
+
+export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow = true,
+                          liveModel = '', scratch = '', summary = '', resume = false, onEvent }) {
+  /* STARTED only knows about this process's own runs. A session loaded from disk
+     was claimed by an earlier run of this server, so the caller says so with
+     `resume` — without it the CLI is handed an id it has already claimed and the
+     turn dies on a restart. */
+  const resuming = !!sessionId && (resume || STARTED.has(sessionId));
+  const sid = resuming ? sessionId : randomUUID();
+  STARTED.add(sid);
+  const args = buildArgs({ root, prompt, sid, resuming, model, useWorkflow,
+                           liveModel, scratch, summary });
 
   const proc = spawn('claude', args, {
     cwd: root,
