@@ -4,7 +4,7 @@ import * as api from './api.mjs';
 import { draw, initChartInteractions } from './chart.mjs';
 import { renderControls, initAccordions, setOnChange } from './panel.mjs';
 import { initSettings, fillModels, closeSettings, refreshEnv, refreshLocal } from './settings.mjs';
-import { initChat, toggleChat, setOnModelChanged, offerScratchSetup, dumpChats, loadChats } from './chat.mjs';
+import { initChat, toggleChat, setOnModelChanged, setOnSessionDeleted, offerScratchSetup, dumpChats, loadChats } from './chat.mjs';
 import { initExport, initImport } from './export.mjs';
 import { initSession, saveSoon } from './session.mjs';
 
@@ -109,18 +109,21 @@ setOnChange(commitSoon);
 
 /* ---------------- project name ----------------
    Click the breadcrumb and type. Read back as textContent everywhere, so a paste
-   that smuggles markup can only ever be text. */
+   that smuggles markup can only ever be text. Not persisted: every fresh load
+   starts at PROJ_DEF, and only opening a saved session (setAll) sets it from disk.
+   `lastCommitted` is in-memory only, for the Escape-to-revert handler. */
 const proj = $('#projName');
 const PROJ_DEF = 'Untitled project';
 const projName = () => proj.textContent.replace(/\s+/g,' ').trim() || PROJ_DEF;
+let lastCommitted = PROJ_DEF;
 function setProjName(n, save = true){
   proj.textContent = n || PROJ_DEF;
-  if(save) store.set('projName', projName());
+  if(save) lastCommitted = projName();
 }
-setProjName(store.get('projName', PROJ_DEF), false);
+setProjName(PROJ_DEF, false);
 proj.addEventListener('keydown', e=>{
   if(e.key==='Enter'){ e.preventDefault(); proj.blur(); }
-  if(e.key==='Escape'){ setProjName(store.get('projName', PROJ_DEF), false); proj.blur(); }
+  if(e.key==='Escape'){ setProjName(lastCommitted, false); proj.blur(); }
 });
 proj.addEventListener('blur', ()=>{ setProjName(projName()); saveSoon(); });
 
@@ -224,6 +227,8 @@ addEventListener('keydown',e=>{
 
 /* ---------------- boot ---------------- */
 setOnModelChanged(src=>{ editor.value = src; run(); });
+// a deleted session's name must not survive to regenerate the folder it named
+setOnSessionDeleted(()=> setProjName(PROJ_DEF));
 
 (async function boot(){
   const savedTheme = store.get('theme',null); if(savedTheme) applyTheme(savedTheme);

@@ -14,8 +14,9 @@ const SUGGEST = [
   'Compute the flux control coefficients',
 ];
 
-let abort = null, onModelChanged = () => {};
+let abort = null, onModelChanged = () => {}, onSessionDeleted = () => {};
 export const setOnModelChanged = fn => { onModelChanged = fn; };
+export const setOnSessionDeleted = fn => { onSessionDeleted = fn; };
 
 const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 
@@ -345,6 +346,7 @@ export function initChat(){
     if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
     const r = await deleteCurrent();
     if(r.error) return alert('Could not delete: ' + r.error);
+    onSessionDeleted();          // back to a clean Untitled project — nothing left to regenerate it
     loadChats([]);
   };
   $('#chatPick').onchange = e => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
