@@ -63,6 +63,10 @@ export function replaySlice(log, cap = REPLAY_CAP){
 // backend/sessions.mjs's KEEP and a hardcoded `12` here were exactly the two
 // disagreeing thresholds behind three earlier bugs on this branch. 0 (nothing
 // to drop) when keep is missing/0 or history is already within it: never guess.
+// Both server emit sites always send keep: KEEP today, so an undefined keep is
+// unreachable in practice; it would only show up under client/server version
+// skew, where "stop trimming" is the safe direction — don't mistake this for
+// the unbounded-history bug already fixed once on this branch.
 // Pure so it's testable without a DOM.
 export function overflowCount(historyLength, keep){
   if(!keep || historyLength <= keep) return 0;
@@ -426,10 +430,17 @@ export function initChat(){
                 ' and everything in it — the conversation, the model snapshot and every '+
                 'file the AI wrote. This cannot be undone.')) return;
     if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
-    const r = await deleteCurrent();
-    if(r.error) return alert('Could not delete: ' + r.error);
-    onSessionDeleted();          // back to a clean Untitled project — nothing left to regenerate it
-    loadChats([]);
+    // Belt-and-braces alongside session.mjs's own reentrancy counter: disabled while
+    // in flight so a second confirm() dialog can't even be opened for this session.
+    $('#delSession').disabled = true;
+    try {
+      const r = await deleteCurrent();
+      if(r.error) return alert('Could not delete: ' + r.error);
+      onSessionDeleted();          // back to a clean Untitled project — nothing left to regenerate it
+      loadChats([]);
+    } finally {
+      $('#delSession').disabled = false;
+    }
   };
   $('#chatPick').onchange = e => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
                                    show(+e.target.value); };

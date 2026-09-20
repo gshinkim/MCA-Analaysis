@@ -68,4 +68,53 @@ import { defaultId, worthSaving, initSession, saveSoon, deleteCurrent } from './
   delete globalThis.fetch;
 }
 
+{
+  // THE REENTRANCY GAP: two overlapping deleteCurrent() calls — reachable because
+  // the delete button's click handler is async and nothing disables it while a
+  // delete is in flight, so a user can accept two confirm() dialogs before the
+  // first fetch resolves. A plain boolean `deleting` flag lets the FIRST call's
+  // finally clear it while the SECOND call's post() is still pending, reopening
+  // the window for saveSoon() to arm a save that resurrects the folder. Must be
+  // a counter: only the LAST delete to settle may re-enable saving. Drives the
+  // REAL exported deleteCurrent()/saveSoon(), not a pure helper standing in.
+  initSession({ getName: () => 'Bob Smith', getModel: () => 'model text', getSettings: () => ({}),
+                getChats: () => [{ log: [{ q: 'x', a: 'y' }] }], setAll: () => {} });
+
+  const calls = [];
+  let releaseDelete1, releaseDelete2;
+  const gate1 = new Promise(r => { releaseDelete1 = r; });
+  const gate2 = new Promise(r => { releaseDelete2 = r; });
+  let deleteCallCount = 0;
+  globalThis.fetch = (path, opts) => {
+    calls.push({ path, body: opts?.body ? JSON.parse(opts.body) : null });
+    if (path === '/api/sessions/delete') {
+      deleteCallCount++;
+      const gate = deleteCallCount === 1 ? gate1 : gate2;
+      return gate.then(() => ({ json: async () => ({ ok: true }) }));
+    }
+    return Promise.resolve({ json: async () => ({ id: 'bob-smith' }) });
+  };
+
+  S.sessionDirId = 'bob-smith';
+  const del1 = deleteCurrent();   // first overlapping delete, fetch pending
+  const del2 = deleteCurrent();   // second, fired before the first settles
+
+  releaseDelete1();
+  await del1;                     // first delete resolves; the SECOND's fetch is still pending
+  saveSoon();                     // fired in the reentrancy gap — must still be blocked
+  await new Promise(r => setTimeout(r, 900));   // let the debounce window pass
+
+  assert.equal(calls.some(c => c.path === '/api/sessions/save'), false,
+    'no save may fire while a second overlapping delete is still in flight');
+
+  releaseDelete2();
+  await del2;
+
+  await new Promise(r => setTimeout(r, 900));
+  assert.equal(calls.some(c => c.path === '/api/sessions/save'), false,
+    'no save may land after both deletes settle either');
+
+  delete globalThis.fetch;
+}
+
 console.log('session id ok');
