@@ -1,5 +1,6 @@
 .venv/
-workspace/runs/
+workspace/runs/*
+!workspace/runs/.gitkeep
 node_modules/
 .DS_Store
 workspace/model_candidate.txt
