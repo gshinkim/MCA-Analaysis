@@ -173,4 +173,23 @@ console.log('sessions open/delete ok');
 
 console.log('sessions compaction ok');
 
+{
+  const { mkdtemp, mkdir, stat: st } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { saveSession, listSessions } = await import('./sessions.mjs');
+
+  const runs = join(await mkdtemp(join(tmpdir(), 'mca-')), 'runs');
+  await mkdir(runs, { recursive: true });
+
+  const { id: first } = await saveSession(runs, { id: '2026-09-20', name: 'Untitled project',
+                                                  chats: [], settings: {}, model: 'm' });
+  const { id: renamed } = await saveSession(runs, { id: first, name: 'Glycolysis v2',
+                                                    chats: [], settings: {}, model: 'm' });
+  assert.equal(renamed, 'Glycolysis-v2');
+  assert.equal(await st(join(runs, first)).catch(() => null), null, 'the dated folder is gone');
+  assert.deepEqual((await listSessions(runs)).map(s => s.id), ['Glycolysis-v2']);
+}
+
+console.log('sessions rename ok');
+
 console.log('sessions slug ok');

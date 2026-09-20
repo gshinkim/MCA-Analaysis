@@ -4,8 +4,9 @@ import * as api from './api.mjs';
 import { draw, initChartInteractions } from './chart.mjs';
 import { renderControls, initAccordions, setOnChange } from './panel.mjs';
 import { initSettings, fillModels, closeSettings, refreshEnv, refreshLocal } from './settings.mjs';
-import { initChat, toggleChat, setOnModelChanged, offerScratchSetup } from './chat.mjs';
+import { initChat, toggleChat, setOnModelChanged, offerScratchSetup, dumpChats, loadChats } from './chat.mjs';
 import { initExport, initImport } from './export.mjs';
+import { initSession, saveSoon } from './session.mjs';
 
 const editor = $('#model');
 
@@ -121,7 +122,7 @@ proj.addEventListener('keydown', e=>{
   if(e.key==='Enter'){ e.preventDefault(); proj.blur(); }
   if(e.key==='Escape'){ setProjName(store.get('projName', PROJ_DEF), false); proj.blur(); }
 });
-proj.addEventListener('blur', ()=> setProjName(projName()));
+proj.addEventListener('blur', ()=>{ setProjName(projName()); saveSoon(); });
 
 /* ---------------- default config: captured once, replaced only on request ---------------- */
 const snapshot = () => ({ src: editor.value, ...cfg() });
@@ -229,6 +230,21 @@ setOnModelChanged(src=>{ editor.value = src; run(); });
   matchMedia('(prefers-color-scheme:dark)').addEventListener('change',()=>draw());
 
   initAccordions(); initSettings(); initChartInteractions(); initChat(); initExport();
+  initSession({
+    getName: projName,
+    getModel: () => editor.value,
+    getSettings: cfg,
+    getChats: dumpChats,
+    setAll: s => {
+      setProjName(s.name, true);
+      if(s.model) editor.value = s.model;
+      if(s.settings?.points){ $('#tStart').value = s.settings.start ?? 0;
+                              $('#tEnd').value = s.settings.end ?? 100;
+                              $('#nPts').value = s.settings.points; }
+      loadChats(s.chats);
+      S.view = null; run();
+    },
+  });
   initImport((text, name) => {                 // loading a file replaces the live model
     editor.value = text;
     setProjName(name.replace(/\.(ant|txt|antimony)$/i,''));
@@ -249,6 +265,7 @@ setOnModelChanged(src=>{ editor.value = src; run(); });
     // the picker is built before this resolves, and on a hosted deployment the
     // built-in Claude models must drop out of it
     S.env = e; refreshEnv(); fillModels(); offerScratchSetup();
+    if(e.hosted) ['#openSession','#delSession'].forEach(s => $(s).hidden = true);
     if(!e.telluriumInstalled) status('err','Tellurium not installed — run: bash setup.sh');
     if(e.claude.error) $('#aiBar').title = e.claude.error;
   });

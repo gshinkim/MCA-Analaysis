@@ -5,7 +5,8 @@ import { resolveModel, useWorkflow, scratchDir, openSettings } from './settings.
 import { runBrowserAgent } from './agent.mjs';
 import { renderMarkdown } from './md.mjs';
 import { downloadChat } from './export.mjs';
-import { currentId, saveSoon, setTurnBusy } from './session.mjs';
+import { currentId, saveSoon, setTurnBusy, openSessionById, deleteCurrent } from './session.mjs';
+import { pickSession } from './sessionpicker.mjs';
 
 const SUGGEST = [
   'Explain what this model does',
@@ -49,9 +50,6 @@ export function loadChats(saved){
   }
   if(!chats.length) makeChat(); else show(chats.at(-1).id);
 }
-
-export const currentSummary = () => cur()?.summary ?? '';
-export function setSummary(text){ const c = cur(); if(c) c.summary = text; }
 
 function makeChat(){
   const thread = document.createElement('div');
@@ -331,6 +329,22 @@ export function initChat(){
   $('#chatClose').onclick=()=>toggleChat(false);
   $('#newChat').onclick = ()=>{ if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
                                makeChat(); $('#ask').focus(); };
+  $('#openSession').onclick = async () => {
+    const id = await pickSession();
+    if(!id) return;
+    try { await openSessionById(id); }
+    catch(e){ alert('Could not open that session: ' + e.message); }
+  };
+  $('#delSession').onclick = async () => {
+    const id = currentId();
+    if(!id) return flash($('#delSession'), '—');
+    if(!confirm('Delete this session?\n\nThis removes workspace/runs/' + id +
+                ' and everything in it — the conversation, the model snapshot and every '+
+                'file the AI wrote. This cannot be undone.')) return;
+    const r = await deleteCurrent();
+    if(r.error) return alert('Could not delete: ' + r.error);
+    loadChats([]);
+  };
   $('#chatPick').onchange = e => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
                                    show(+e.target.value); };
   $('#send').onclick = ()=>{ if(abort){ abort(); abort=null; $('#send').textContent='Send'; } else send(); };

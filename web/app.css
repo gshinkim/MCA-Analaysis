@@ -420,3 +420,7 @@ input[type=range]::-moz-range-thumb{width:14px;height:14px;border:2px solid var(
 .sp-q:focus{box-shadow:0 0 0 2px var(--accent);border-color:transparent}
 .sp-when{font-size:11px;color:var(--muted);flex:none;font-variant-numeric:tabular-nums}
 .fp-row.sel .sp-when{color:var(--accent-ink);opacity:.8}
+
+/* the only irreversible control in the app; it should look like one */
+.btn.danger{background:var(--crit);color:#fff;border-color:transparent}
+.btn.danger:hover{filter:brightness(1.08)}
