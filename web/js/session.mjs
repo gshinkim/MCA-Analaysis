@@ -31,8 +31,16 @@ export function initSession(hooks) { ({ getName, getModel, getSettings, getChats
 
 export const currentId = () => S.sessionDirId;
 
+/** No folder exists yet, and nothing in any chat is worth creating one for.
+    Guards saveNow against recreating a just-deleted session: once a turn
+    completes, its chat gets a log entry and saving proceeds normally. */
+export function worthSaving(sessionDirId, chats) {
+  return sessionDirId != null || (chats ?? []).some(c => c?.log?.length > 0);
+}
+
 export async function saveNow() {
   if (S.env?.hosted) return null;
+  if (!worthSaving(S.sessionDirId, getChats())) return null;
   const id = S.sessionDirId ?? defaultId(getName());
   const r = await post('/api/sessions/save', { id, name: getName(), chats: getChats(),
                                                settings: getSettings(), model: getModel() });
