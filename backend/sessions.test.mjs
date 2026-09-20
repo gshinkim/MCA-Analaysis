@@ -140,4 +140,37 @@ console.log('sessions list/save ok');
 
 console.log('sessions open/delete ok');
 
+{
+  const { splitHistory, summaryPrompt } = await import('./sessions.mjs');
+  const msgs = n => Array.from({ length: n }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user',
+                                                           content: 'm' + i }));
+
+  // under the cap nothing is folded away
+  const small = splitHistory(msgs(12));
+  assert.deepEqual(small.fold, []);
+  assert.equal(small.recent.length, 12);
+
+  // 13 in: one folds out, exactly 12 are kept, and the newest is still last
+  const over = splitHistory(msgs(13));
+  assert.equal(over.fold.length, 1);
+  assert.equal(over.fold[0].content, 'm0');
+  assert.equal(over.recent.length, 12);
+  assert.equal(over.recent.at(-1).content, 'm12');
+
+  const wide = splitHistory(msgs(30));
+  assert.equal(wide.fold.length, 18);
+  assert.equal(wide.recent.length, 12);
+
+  // the prior summary is carried in, not discarded — this is what makes it a loop
+  const p = summaryPrompt('Step 3 holds the control.', msgs(2));
+  const all = p.map(m => m.content).join('\n');
+  assert.match(all, /Step 3 holds the control\./, 'prior summary is folded in');
+  assert.match(all, /m0/, 'the messages falling off are included');
+
+  const first = summaryPrompt('', msgs(2));
+  assert.doesNotMatch(first.map(m => m.content).join('\n'), /undefined|null/);
+}
+
+console.log('sessions compaction ok');
+
 console.log('sessions slug ok');

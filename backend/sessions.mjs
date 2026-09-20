@@ -122,3 +122,31 @@ export const writeSummary = async (dir, text) => {
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, SUMMARY), text);
 };
+
+export const KEEP = 12;
+
+/** Newest `keep` messages stay; everything older is what gets folded into the summary. */
+export function splitHistory(history, keep = KEEP) {
+  const h = history ?? [];
+  if (h.length <= keep) return { fold: [], recent: h.slice() };
+  return { fold: h.slice(0, h.length - keep), recent: h.slice(h.length - keep) };
+}
+
+/* Carrying the previous summary back in is the whole point: each pass compresses
+   summary + the next batch into one summary, so memory of turn 1 survives turn 90
+   instead of falling off the end. */
+export function summaryPrompt(prevSummary, fold) {
+  const transcript = (fold ?? []).map(m => `${m.role}: ${m.content}`).join('\n\n');
+  return [
+    { role: 'system', content:
+      'You compress the memory of a computational-biology modelling session. Write ' +
+      'notes to your future self: what the model is, what was asked, what was computed ' +
+      'and what the numbers were. Keep every quantitative result and every decision ' +
+      'about the model. Drop pleasantries and restatements. Prose or bullets, under ' +
+      '400 words, no preamble — output the notes themselves.' },
+    { role: 'user', content:
+      (prevSummary?.trim()
+        ? 'Notes so far:\n\n' + prevSummary.trim() + '\n\n---\n\nNewer turns to fold in:\n\n'
+        : 'Turns to summarise:\n\n') + transcript },
+  ];
+}
