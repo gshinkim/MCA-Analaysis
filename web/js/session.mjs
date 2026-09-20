@@ -55,16 +55,20 @@ export async function saveNow() {
 }
 
 /* Autosave is debounced, and deferred while a turn is running: renaming the folder
-   out from under a running agent breaks the absolute paths it is holding. */
-let t = null, busy = false, pending = false, scheduled = false;
+   out from under a running agent breaks the absolute paths it is holding. `deleting`
+   blocks a save from being armed (or re-armed) while deleteCurrent() is in flight —
+   without it, a save timer set just before delete(), or one set by a stray caller
+   DURING the delete's own await, can fire after the folder is gone and recreate it. */
+let t = null, busy = false, pending = false, scheduled = false, deleting = false;
 export function saveSoon() {
+  if (deleting) return;                 // the current session is being deleted — never arm a save for it
   clearTimeout(t);
   scheduled = true;
   t = setTimeout(() => { scheduled = false; if (busy) { pending = true; return; } saveNow(); }, 800);
 }
 export function setTurnBusy(on) {
   busy = on;
-  if (!on && pending) { pending = false; saveNow(); }
+  if (!on && pending && !deleting) { pending = false; saveNow(); }
 }
 
 /* A debounce still outstanding (or deferred behind a busy turn) targets whoever
@@ -76,6 +80,14 @@ async function flushPending() {
   clearTimeout(t);
   scheduled = false; pending = false;
   await saveNow();
+}
+
+/* Same triggers as flushPending, but CANCELS instead of flushing: used by
+   deleteCurrent(), where writing the folder back out is exactly the opposite of
+   what the user just asked for ("I deleted it and it comes back"). */
+function cancelPending() {
+  clearTimeout(t);
+  scheduled = false; pending = false;
 }
 
 export async function openSessionById(id) {
@@ -90,7 +102,13 @@ export async function openSessionById(id) {
 export async function deleteCurrent() {
   const id = S.sessionDirId;
   if (!id) return { ok: true };
-  const r = await post('/api/sessions/delete', { id });
-  if (!r.error) S.sessionDirId = null;
-  return r;
+  deleting = true;                      // block saveSoon()/setTurnBusy() from arming a save until this settles
+  cancelPending();                      // a save already armed for THIS id must not race the delete below
+  try {
+    const r = await post('/api/sessions/delete', { id });
+    if (!r.error) S.sessionDirId = null;
+    return r;
+  } finally {
+    deleting = false;
+  }
 }

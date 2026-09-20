@@ -11,7 +11,7 @@ import { runLocalAgent, Chat } from './local-agent.mjs';
 import { homedir } from 'node:os';
 import { listSessions, saveSession, openSession, deleteSession,
          sessionDir, readSummary, writeSummary, buildTurn, summaryPrompt,
-         summaryStrategy, trimRecord, appendThinking } from './sessions.mjs';
+         summaryStrategy, trimRecord, appendThinking, KEEP } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -378,7 +378,7 @@ const routes = {
                                                   maxTokens: 900 });
                 if (msg.content?.trim()) {
                   await writeSummary(sdir, msg.content.trim());
-                  send({ type: 'compacted', summary: msg.content.trim() });
+                  send({ type: 'compacted', summary: msg.content.trim(), keep: KEEP });
                 }
               }
             } else if (strategy === 'trim') {
@@ -391,7 +391,7 @@ const routes = {
               // same way it already does for the compress runtime — only after this
               // fold is actually written to disk, never before (see the comment on
               // the client's 'compacted' handler for why that order matters).
-              send({ type: 'compacted', summary: text });
+              send({ type: 'compacted', summary: text, keep: KEEP });
             } else if (!summary?.trim()) {
               // 'record': nothing folded this turn, so there is nothing new to write —
               // but writing unconditionally here used to overwrite whatever the LAST

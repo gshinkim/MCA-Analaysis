@@ -4,7 +4,7 @@ import * as api from './api.mjs';
 import { draw, initChartInteractions } from './chart.mjs';
 import { renderControls, initAccordions, setOnChange } from './panel.mjs';
 import { initSettings, fillModels, closeSettings, refreshEnv, refreshLocal } from './settings.mjs';
-import { initChat, toggleChat, setOnModelChanged, setOnSessionDeleted, offerScratchSetup, dumpChats, loadChats } from './chat.mjs';
+import { initChat, toggleChat, setOnModelChanged, setOnSessionDeleted, offerScratchSetup, dumpChats, loadChats, noteNoModel } from './chat.mjs';
 import { initExport, initImport } from './export.mjs';
 import { initSession, saveSoon } from './session.mjs';
 
@@ -247,11 +247,19 @@ setOnSessionDeleted(()=> setProjName(PROJ_DEF));
     getChats: dumpChats,
     setAll: s => {
       setProjName(s.name, true);
+      // Deliberately not cleared when empty: that would diverge from
+      // workspace/model.txt, which the server also leaves alone on an empty
+      // snapshot (backend/server.mjs's own `if (s.model)` skip). Diverging the
+      // editor from the live file on disk is worse than the alternative below.
       if(s.model) editor.value = s.model;
       if(s.settings?.points){ $('#tStart').value = s.settings.start ?? 0;
                               $('#tEnd').value = s.settings.end ?? 100;
                               $('#nPts').value = s.settings.points; }
       loadChats(s.chats);
+      // The editor above was left showing whatever project was open before —
+      // flag it, so the user is never silently shown another project's model
+      // while believing it belongs to the session they just opened.
+      if(!s.model) noteNoModel();
       S.view = null; run();
     },
   });

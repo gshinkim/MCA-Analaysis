@@ -2,7 +2,7 @@
    No DOM: pins the replay-cap decision loadChats uses to bound how many turns
    of a restored session get rendered (the DOM-touching part can't run here). */
 import assert from 'node:assert/strict';
-import { replaySlice, REPLAY_CAP, isEchoedThought } from './chat.mjs';
+import { replaySlice, REPLAY_CAP, isEchoedThought, chatSnapshot, overflowCount } from './chat.mjs';
 
 const turn = n => ({ q: 'q'+n, a: 'a'+n });
 
@@ -73,6 +73,51 @@ const turn = n => ({ q: 'q'+n, a: 'a'+n });
 {
   // first block of the turn, thoughts still empty: never suppressed
   assert.equal(isEchoedThought('', 'Let me think about this step by step.'), false);
+}
+
+{
+  // dumpChats persists exactly what a chat needs to be restored, nothing more.
+  // `summary` used to be written here too, but nothing ever reads it back — the
+  // real rolling memory lives server-side in summary.md, keyed by sessionDirId.
+  // A chat object still carrying a stray `summary` (an older in-memory value, or
+  // one spread in from a session.json saved before this fix) must not have it
+  // written back out. This calls the REAL dumpChats mapping (chatSnapshot), not a
+  // second copy of it.
+  const list = [{ id: 1, title: 'T', history: [{ role: 'user', content: 'hi' }],
+                  sessionId: 's1', log: [{ q: 'hi', a: 'yo' }], summary: 'stale leftover',
+                  thread: {} }];
+  const out = chatSnapshot(list);
+  assert.deepEqual(out, [{ id: 1, title: 'T', history: [{ role: 'user', content: 'hi' }],
+                           sessionId: 's1', log: [{ q: 'hi', a: 'yo' }] }]);
+  assert.ok(!('summary' in out[0]), 'summary must not be persisted');
+  assert.ok(!('thread' in out[0]), 'the live DOM node must never be persisted either');
+}
+
+{
+  // Round-trip with an OLDER session.json that already has a `summary` key on a
+  // chat: loading it (a plain spread onto the in-memory chat object, same as
+  // loadChats does) must not throw, and re-saving it must drop the stale field
+  // rather than propagate it forever.
+  const oldSavedChat = { id: 2, title: 'Old', history: [], sessionId: null, log: [],
+                          summary: 'from before this fix' };
+  const loaded = { ...oldSavedChat, thread: {} };   // what loadChats does per chat
+  assert.doesNotThrow(() => chatSnapshot([loaded]));
+  const resaved = chatSnapshot([loaded]);
+  assert.ok(!('summary' in resaved[0]), 'a legacy summary field must not survive a resave');
+}
+
+{
+  // The 'compacted' handler trims c.history to whatever KEEP the SERVER just used
+  // (backend/sessions.mjs's KEEP, sent over the wire as ev.keep) — never a
+  // client-side copy of the constant. Two independent literal `12`s on either
+  // side of this exact boundary were the shape of three earlier bugs on this
+  // branch, so this must be proven against a keep value that ISN'T 12 too, or a
+  // future divergence would hide behind a suite that only ever exercises 12.
+  assert.equal(overflowCount(20, 12), 8);
+  assert.equal(overflowCount(20, 5), 15);      // some OTHER server keep — not 12
+  assert.equal(overflowCount(10, 12), 0);      // already within keep: nothing to drop
+  assert.equal(overflowCount(20, undefined), 0); // no keep sent: never guess, never trim
+  assert.equal(overflowCount(20, 0), 0);
 }
 
 console.log('chat replay-cap ok');

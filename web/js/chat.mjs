@@ -29,9 +29,16 @@ let active = null, seq = 0;
 const cur = () => chats.find(c => c.id === active);
 
 /* Sessions persist conversations to disk, so the array stops being private to this
-   module. `thread` is a live DOM node and never travels; everything else does. */
-export const dumpChats = () => chats.map(({ id, title, history, sessionId, log, summary }) =>
-  ({ id, title, history, sessionId, log, summary }));
+   module. `thread` is a live DOM node and never travels; everything else does.
+   No `summary` field: the real rolling memory lives server-side in summary.md,
+   keyed by sessionDirId — a per-chat `summary` was dead weight nothing ever read
+   back, left over from before that server-side memory existed. Pure, so the
+   persisted shape is testable without a DOM; dumpChats calls this directly rather
+   than re-implementing the mapping. */
+export function chatSnapshot(list){
+  return list.map(({ id, title, history, sessionId, log }) => ({ id, title, history, sessionId, log }));
+}
+export const dumpChats = () => chatSnapshot(chats);
 
 // Replaying a session re-parses markdown and builds DOM for every turn ever logged
 // (log, unlike history, is never trimmed). Cap what gets REPLAYED on open; the full
@@ -50,6 +57,18 @@ export function replaySlice(log, cap = REPLAY_CAP){
 // opening. Scope the check to the text since the last "— phase —" separator
 // (or the whole buffer, for the turn's first phase), i.e. what "immediately
 // preceded" this block. Pure so it can be unit-tested without a DOM.
+// How many of the OLDEST entries in c.history to drop once the server confirms
+// (over the 'compacted' event's `keep`) that it folded everything past that
+// count into summary.md. The server's number, never a client-side literal —
+// backend/sessions.mjs's KEEP and a hardcoded `12` here were exactly the two
+// disagreeing thresholds behind three earlier bugs on this branch. 0 (nothing
+// to drop) when keep is missing/0 or history is already within it: never guess.
+// Pure so it's testable without a DOM.
+export function overflowCount(historyLength, keep){
+  if(!keep || historyLength <= keep) return 0;
+  return historyLength - keep;
+}
+
 export function isEchoedThought(thoughts, text){
   const t = (text || '').trim();
   if(!t) return false;
@@ -84,6 +103,20 @@ export function loadChats(saved){
     }
   }
   if(!chats.length) makeChat(); else show(chats.at(-1).id);
+}
+
+/* Called by main.mjs's setAll after loadChats(), when the session just opened had
+   no saved model snapshot. Both server.mjs and main.mjs deliberately leave the
+   editor untouched in that case (clearing it would diverge from the live
+   workspace/model.txt, which is worse) — but that means the editor is silently
+   still showing whatever project was open before. Flag it, the same way an
+   unverified answer or a tool-less turn already gets flagged above. */
+export function noteNoModel(){
+  const d = document.createElement('div'); d.className = 'meta warn';
+  d.textContent = 'This session has no saved model — the editor still shows the '+
+                  'previous project’s model, not this session’s.';
+  (cur()?.thread ?? $('#msgs')).append(d);
+  $('#msgs').scrollTop = 1e9;
 }
 
 function makeChat(){
@@ -277,16 +310,19 @@ function send(){
       }
       if(ev.type==='model_changed'){ onModelChanged(ev.src); return; }
       if(ev.type==='compacted'){
-        // The server just folded the older turns into c.summary — those turns'
-        // content lives on the server's summary.md now, so trim the client's copy
-        // to match. Trimming unconditionally (as this used to do, before every
-        // send) fed the server a payload that could never exceed 12 messages, so
-        // the server could never see more than 12 either — it always took the
-        // 'record' branch and compression never ran. Trimming only here, after the
-        // server confirms it actually folded something, is what makes turn 13+
-        // reach the server whole enough to fold in the first place.
-        c.summary = ev.summary;
-        if(c.history.length > 12) c.history.splice(0, c.history.length - 12);
+        // The server just folded the older turns into summary.md (server-side —
+        // there is no client-side copy of that memory) — those turns' content
+        // lives there now, so trim the client's history to match. Trimming
+        // unconditionally (as this used to do, before every send) fed the server
+        // a payload that could never exceed the keep window, so the server could
+        // never see more either — it always took the 'record' branch and
+        // compression never ran. Trimming only here, after the server confirms it
+        // actually folded something, is what makes the turn after the window
+        // reach the server whole enough to fold in the first place. `ev.keep` is
+        // the server's own KEEP constant, sent over the wire rather than
+        // re-declared here as a literal that could drift from it.
+        const drop = overflowCount(c.history.length, ev.keep);
+        if(drop) c.history.splice(0, drop);
         return;
       }
       if(ev.type==='fatal'){
