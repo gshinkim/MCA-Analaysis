@@ -9,6 +9,7 @@ import { Tellurium } from './tellurium.mjs';
 import { runAgent, toUiEvent } from './agent.mjs';
 import { runLocalAgent } from './local-agent.mjs';
 import { homedir } from 'node:os';
+import { listSessions, saveSession, openSession, deleteSession } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -210,6 +211,44 @@ const routes = {
       error: 'This deployment runs Tellurium only; there is no local folder to write to.' });
     try { json(res, 200, { ok: true, dir: await resolveScratch(dir), default: RUNS }); }
     catch (e) { json(res, 200, { ok: false, error: String(e.message || e) }); }
+  },
+
+  /* Sessions. One folder each under workspace/runs/; the directory listing is the
+     session list. Hosted deployments have no local folder to keep them in. */
+  'GET /api/sessions': async (req, res) => {
+    if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
+    await ensureWorkspace();
+    json(res, 200, { sessions: await listSessions(RUNS) });
+  },
+
+  'POST /api/sessions/save': async (req, res) => {
+    if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
+    const { id, name, chats, settings, model } = await body(req);
+    if (!id) return json(res, 400, { error: 'id is required' });
+    await ensureWorkspace();
+    try { json(res, 200, await saveSession(RUNS, { id, name, chats, settings, model })); }
+    catch (e) { json(res, 400, { error: String(e.message || e) }); }
+  },
+
+  'POST /api/sessions/open': async (req, res) => {
+    if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
+    const { id } = await body(req);
+    await ensureWorkspace();
+    let s;
+    try { s = await openSession(RUNS, id); }
+    catch (e) { return json(res, 400, { error: String(e.message || e) }); }
+    // the snapshot becomes the live model the agent reads and the editor shows
+    if (s.model) await writeFile(MODEL_FILE, s.model);
+    if (s.settings && Object.keys(s.settings).length)
+      await writeFile(SETTINGS_FILE, JSON.stringify(s.settings, null, 2));
+    json(res, 200, { ...s, version: await modelVersion() });
+  },
+
+  'POST /api/sessions/delete': async (req, res) => {
+    if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
+    const { id } = await body(req);
+    try { await deleteSession(RUNS, id); json(res, 200, { ok: true }); }
+    catch (e) { json(res, 400, { error: String(e.message || e) }); }
   },
 
   /* Probe an OpenAI-compatible endpoint and list the models it serves. */
