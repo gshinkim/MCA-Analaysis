@@ -318,6 +318,12 @@ const EXEC_NOTE =
   'kept in the working folder as the reproducibility record.';
 
 /* ------------------------------ the outer turn ------------------------------ */
+/* `history` and `summary` must already be split (server.mjs does this with
+   sessions.mjs's buildTurn): `history` is only the live message window, `summary`
+   only describes turns that already folded OUT of it. Handing this function the
+   full, untrimmed history AND a summary rendered from that same history is the
+   defect that made a local model loop — it saw one turn's content twice, once
+   live and once declared "settled, do not re-derive". */
 export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow = true,
                                liveModel = '', te, onEvent, summary = '',
                                scratch = join(root, 'workspace/runs') }) {

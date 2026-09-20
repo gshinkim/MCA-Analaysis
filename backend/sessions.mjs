@@ -163,6 +163,21 @@ export function splitHistory(history, keep = KEEP) {
   return { fold: h.slice(0, h.length - keep), recent: h.slice(h.length - keep) };
 }
 
+/** The one place that decides what a turn sends the model and what backs it up.
+    `messages` is the live window (last `keep`) — send this, not the full history.
+    `fold` is what just aged out of the window — the caller compresses/records this
+    into summary.md at the end of the turn, for NEXT turn's `summaryText`.
+    `inject` is what goes in the system prompt THIS turn: the summary already on
+    disk, describing only turns folded in *earlier* turns — never the live window,
+    which is exactly the contradiction that sent a local model into a loop (it was
+    told a turn was old and settled while also being handed it live). Empty until
+    something has actually folded. Pure — no I/O — so the invariant is testable
+    without a filesystem or a model call. */
+export function buildTurn(history, summaryText, keep = KEEP) {
+  const { fold, recent } = splitHistory(history, keep);
+  return { messages: recent, fold, inject: (summaryText ?? '').trim() };
+}
+
 /** Plain, no-model record of a conversation: every message, oldest first, no
     compression. Cheap enough to write on every turn — this is what summary.md
     gets when there's nothing worth spending a model call on yet, or no cheap

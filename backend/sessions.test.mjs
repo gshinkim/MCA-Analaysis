@@ -286,4 +286,63 @@ console.log('sessions summary strategy ok');
 
 console.log('sessions thinking ok');
 
+{
+  const { buildTurn, renderRecord } = await import('./sessions.mjs');
+  // "_end" suffix so 'msg1_end' is never a substring of 'msg10_end' etc. — plain
+  // numeric suffixes would make the duplication check below pass by accident.
+  const msgs = n => Array.from({ length: n }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user',
+                                                           content: 'msg' + i + '_end' }));
+
+  // short history, no prior summary: nothing folded, nothing injected, the
+  // whole conversation is still live
+  {
+    const t = buildTurn(msgs(4), '', 12);
+    assert.equal(t.inject, '');
+    assert.equal(t.messages.length, 4);
+    assert.deepEqual(t.fold, []);
+  }
+
+  // long history: only the newest `keep` go to the model; the rest fold away
+  {
+    const t = buildTurn(msgs(20), '', 12);
+    assert.equal(t.messages.length, 12);
+    assert.equal(t.messages.at(-1).content, 'msg19_end', 'newest message must be present');
+    assert.ok(!t.messages.some(m => m.content === 'msg7_end'), 'oldest folded message must be gone');
+    assert.equal(t.fold.length, 8);
+    assert.equal(t.fold[0].content, 'msg0_end');
+  }
+
+  // THE DUPLICATION TEST — the regression guard. A prior summary that (correctly)
+  // describes only the folded-away turns must never share content with the live
+  // message window. If buildTurn ever regresses to rendering the whole history
+  // into `inject` (defect 1), messages from the live window would show up in
+  // both places and this fails.
+  {
+    const history = msgs(20);
+    const { fold } = buildTurn(history, '', 12);
+    const priorSummary = renderRecord(fold);
+    const t = buildTurn(history, priorSummary, 12);
+    const messageText = t.messages.map(m => m.content).join('\n');
+    for (const m of history)
+      assert.ok(!(t.inject.includes(m.content) && messageText.includes(m.content)),
+        m.content + ' must not appear in both inject and messages');
+    // sanity: the guard above isn't vacuous — inject does have real content
+    assert.match(t.inject, /msg0_end/);
+  }
+
+  // empty history: no crash, nothing to send or fold or inject
+  {
+    const t = buildTurn([], '', 12);
+    assert.deepEqual(t.messages, []);
+    assert.deepEqual(t.fold, []);
+    assert.equal(t.inject, '');
+    const t2 = buildTurn(undefined, undefined, 12);
+    assert.deepEqual(t2.messages, []);
+    assert.deepEqual(t2.fold, []);
+    assert.equal(t2.inject, '');
+  }
+}
+
+console.log('sessions buildTurn ok');
+
 console.log('sessions slug ok');

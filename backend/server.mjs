@@ -10,8 +10,8 @@ import { runAgent, toUiEvent } from './agent.mjs';
 import { runLocalAgent, Chat } from './local-agent.mjs';
 import { homedir } from 'node:os';
 import { listSessions, saveSession, openSession, deleteSession,
-         sessionDir, readSummary, writeSummary, splitHistory, summaryPrompt,
-         summaryStrategy, renderRecord, trimRecord, appendThinking } from './sessions.mjs';
+         sessionDir, readSummary, writeSummary, buildTurn, summaryPrompt,
+         summaryStrategy, trimRecord, appendThinking } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -319,6 +319,16 @@ const routes = {
     const summary = sdir ? await readSummary(sdir) : '';
     if (sdir) { await mkdir(sdir, { recursive: true }); scratch = sdir; }
 
+    // The client now sends its whole history (it no longer pre-truncates), so this
+    // is the one place that splits it: `recent` is what the model sees as live
+    // messages, `fold` is what just aged out of that window (compressed/recorded
+    // into summary.md below), and `inject` is what goes in the system prompt this
+    // turn — the summary already on disk, never the live window. Mixing the two
+    // (a turn's content present in both) is exactly the contradiction that sent a
+    // local model into a loop: told a turn was old and settled while also handed
+    // it live.
+    const { messages: recent, fold, inject } = buildTurn(history, summary);
+
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8',
                          'cache-control': 'no-cache', connection: 'keep-alive',
                          'x-accel-buffering': 'no' });
@@ -343,14 +353,19 @@ const routes = {
           if (after !== before) send({ type: 'model_changed', src: after, version: await modelVersion() });
 
           /* summary.md is written every turn a session folder exists, for every
-             runtime: short history is a plain running record (no model call); long
-             history compresses through the model already in use when there's a
-             cheap completion endpoint for it (OpenAI-compatible), otherwise (Claude
-             Code) a bounded record so the file can't grow without limit. */
+             runtime — but only ever describes turns that just folded OUT of the
+             live window (`fold`, above), never the window itself. 'record'
+             (nothing folded yet, short history) writes nothing: the whole
+             conversation is still live, so there is nothing to remember on its
+             behalf yet. 'compress' folds `fold` into the running summary through
+             the model already in use when there's a cheap completion endpoint for
+             it (OpenAI-compatible). 'trim' (Claude Code, no cheap completion
+             endpoint) is the one deliberate exception — the file is Claude Code's
+             only portable memory when --resume isn't available, so it keeps a
+             bounded verbatim record including recent turns by design. */
           if (sdir) try {
             const strategy = summaryStrategy(history?.length, runtime === 'openai' && !!chatCfg);
             if (strategy === 'compress') {
-              const { fold } = splitHistory(history);
               if (fold.length) {
                 const chat = new Chat(chatCfg);
                 const msg = await chat.complete({ messages: summaryPrompt(summary, fold),
@@ -360,8 +375,14 @@ const routes = {
                   send({ type: 'compacted', summary: msg.content.trim() });
                 }
               }
+            } else if (strategy === 'trim') {
+              await writeSummary(sdir, trimRecord(history));
             } else {
-              await writeSummary(sdir, strategy === 'trim' ? trimRecord(history) : renderRecord(history));
+              // ponytail: skipped the "still all in context" human note the design
+              // doc allows here — nothing folded means nothing to inject, and the
+              // file existing (even empty) is what "always exists" requires. Add
+              // the note if a human reading the folder needs it.
+              await writeSummary(sdir, '');
             }
           } catch (e) { console.error('[summary]', e.message); }  // never fail the turn
 
@@ -377,10 +398,10 @@ const routes = {
     // any throw from here on must still reach the browser as an SSE frame
     process.nextTick(() => {});
     const run = runtime === 'openai'
-      ? runLocalAgent({ root: ROOT, prompt: message, history: history || [], chatCfg,
-                        useWorkflow, liveModel: before, te, scratch, summary, onEvent })
+      ? runLocalAgent({ root: ROOT, prompt: message, history: recent, chatCfg,
+                        useWorkflow, liveModel: before, te, scratch, summary: inject, onEvent })
       : runAgent({ root: ROOT, prompt: message, sessionId, model, env: env || {},
-                   useWorkflow, liveModel: before, scratch, summary, resume, onEvent });
+                   useWorkflow, liveModel: before, scratch, summary: inject, resume, onEvent });
     send({ type: 'session', sessionId: run.sessionId ?? sessionId ?? null, runtime: runtime || 'claude-code' });
     req.on('close', () => { clearInterval(ka); run.kill(); });
   },

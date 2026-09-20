@@ -259,7 +259,19 @@ function send(){
         return;
       }
       if(ev.type==='model_changed'){ onModelChanged(ev.src); return; }
-      if(ev.type==='compacted'){ c.summary = ev.summary; return; }
+      if(ev.type==='compacted'){
+        // The server just folded the older turns into c.summary — those turns'
+        // content lives on the server's summary.md now, so trim the client's copy
+        // to match. Trimming unconditionally (as this used to do, before every
+        // send) fed the server a payload that could never exceed 12 messages, so
+        // the server could never see more than 12 either — it always took the
+        // 'record' branch and compression never ran. Trimming only here, after the
+        // server confirms it actually folded something, is what makes turn 13+
+        // reach the server whole enough to fold in the first place.
+        c.summary = ev.summary;
+        if(c.history.length > 12) c.history.splice(0, c.history.length - 12);
+        return;
+      }
       if(ev.type==='fatal'){
         failed = true; text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
       if(ev.type==='done' || ev.type==='closed'){
@@ -273,9 +285,9 @@ function send(){
           c.history.push({ role:'user', content: v });
           c.history.push({ role:'assistant', content: (body || '(no answer)') +
             (acts.length ? '\n\n[tools used this turn: '+acts.join(', ')+']' : '') });
-          // ponytail: last 12 messages; the system prompt is already ~8k tokens.
-          // Summarise instead if conversations need to run longer than that.
-          if(c.history.length > 12) c.history.splice(0, c.history.length - 12);
+          // No trim here: the server needs the full history to know when 12 is
+          // crossed and something needs folding (see the 'compacted' handler
+          // above, which is where the trim actually happens).
         }
         if(thoughts && !think.classList.contains('done')){
           const secs = Math.max(1, Math.round((Date.now()-started)/1000));
