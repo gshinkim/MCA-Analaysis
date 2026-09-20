@@ -345,4 +345,47 @@ console.log('sessions thinking ok');
 
 console.log('sessions buildTurn ok');
 
+{
+  // THE 'trim' DUPLICATION TEST — defect 1 regression guard. server.mjs's 'trim'
+  // strategy (no cheap completion endpoint, e.g. Claude Code) must record
+  // trimRecord(fold), never trimRecord(history): the full history includes the
+  // live window, and injecting that back next turn while it is also sent as
+  // `messages` is exactly what sent a local model into a loop. This fails if
+  // 'trim' is ever repointed at the full history instead of the fold.
+  const { buildTurn, trimRecord, KEEP } = await import('./sessions.mjs');
+  const msgs = n => Array.from({ length: n }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user',
+                                                           content: 'msg' + i + '_end' }));
+  const history = msgs(20);
+
+  // turn N: nothing injected yet, `fold` is what just aged out
+  const turnN = buildTurn(history, '', KEEP);
+  assert.equal(turnN.fold.length, 8);
+
+  // the fix: summary.md is written from the fold, bounded — never the full history
+  const summaryFixed = trimRecord(turnN.fold, KEEP);
+  // the bug being guarded against: writing the full history instead
+  const summaryBuggy = trimRecord(history, KEEP);
+
+  // turn N+1 (same conversation, nothing new sent yet): what actually gets
+  // injected and what actually gets sent live
+  const turnNext = buildTurn(history, summaryFixed, KEEP);
+  const messageText = turnNext.messages.map(m => m.content).join('\n');
+
+  for (const m of history)
+    assert.ok(!(turnNext.inject.includes(m.content) && messageText.includes(m.content)),
+      m.content + ' must not appear in both inject and messages (fixed trim)');
+  assert.match(turnNext.inject, /msg0_end/, 'sanity: the fixed summary has real content');
+
+  // and this is the failure the fix prevents: using the full history reproduces
+  // the exact overlap the invariant forbids
+  const turnNextBuggy = buildTurn(history, summaryBuggy, KEEP);
+  const messageTextBuggy = turnNextBuggy.messages.map(m => m.content).join('\n');
+  const overlapsWhenBuggy = history.some(m =>
+    turnNextBuggy.inject.includes(m.content) && messageTextBuggy.includes(m.content));
+  assert.ok(overlapsWhenBuggy,
+    'sanity: trimRecord(history) must reproduce the duplication this test guards against');
+}
+
+console.log('sessions trim-strategy no-overlap ok');
+
 console.log('sessions slug ok');

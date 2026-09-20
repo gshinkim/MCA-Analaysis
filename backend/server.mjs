@@ -360,9 +360,13 @@ const routes = {
              behalf yet. 'compress' folds `fold` into the running summary through
              the model already in use when there's a cheap completion endpoint for
              it (OpenAI-compatible). 'trim' (Claude Code, no cheap completion
-             endpoint) is the one deliberate exception — the file is Claude Code's
-             only portable memory when --resume isn't available, so it keeps a
-             bounded verbatim record including recent turns by design. */
+             endpoint) records the same `fold` verbatim-but-bounded instead of
+             model-compressed — it must never include the live window either:
+             that window is already sent as `messages` this turn, and injecting
+             it too is exactly the duplication that sent a local model into a
+             loop. summary.md is Claude Code's only portable memory when
+             --resume isn't available, but portable memory means the turns no
+             longer in context, not a second copy of the ones that are. */
           if (sdir) try {
             const strategy = summaryStrategy(history?.length, runtime === 'openai' && !!chatCfg);
             if (strategy === 'compress') {
@@ -376,7 +380,7 @@ const routes = {
                 }
               }
             } else if (strategy === 'trim') {
-              await writeSummary(sdir, trimRecord(history));
+              await writeSummary(sdir, trimRecord(fold));
             } else {
               // ponytail: skipped the "still all in context" human note the design
               // doc allows here — nothing folded means nothing to inject, and the
