@@ -5,6 +5,7 @@ import { resolveModel, useWorkflow, scratchDir, openSettings } from './settings.
 import { runBrowserAgent } from './agent.mjs';
 import { renderMarkdown } from './md.mjs';
 import { downloadChat } from './export.mjs';
+import { currentId, saveSoon, setTurnBusy } from './session.mjs';
 
 const SUGGEST = [
   'Explain what this model does',
@@ -24,6 +25,33 @@ const esc = s => String(s).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'
 const chats = [];
 let active = null, seq = 0;
 const cur = () => chats.find(c => c.id === active);
+
+/* Sessions persist conversations to disk, so the array stops being private to this
+   module. `thread` is a live DOM node and never travels; everything else does. */
+export const dumpChats = () => chats.map(({ id, title, history, sessionId, log, summary }) =>
+  ({ id, title, history, sessionId, log, summary }));
+
+export function loadChats(saved){
+  chats.forEach(c => c.thread.remove());
+  chats.length = 0; active = null;
+  for(const s of saved ?? []){
+    const thread = document.createElement('div');
+    thread.className = 'thread';
+    $('#msgs').append(thread);
+    chats.push({ ...s, thread });
+    seq = Math.max(seq, s.id ?? 0);
+    for(const turn of s.log ?? []){
+      const d = document.createElement('div'); d.className = 'msg me';
+      d.textContent = turn.q; thread.append(d);
+      const a = document.createElement('div'); a.className = 'msg ai';
+      a.innerHTML = renderMarkdown(turn.a || '*(no answer)*'); thread.append(a);
+    }
+  }
+  if(!chats.length) makeChat(); else show(chats.at(-1).id);
+}
+
+export const currentSummary = () => cur()?.summary ?? '';
+export function setSummary(text){ const c = cur(); if(c) c.summary = text; }
 
 function makeChat(){
   const thread = document.createElement('div');
@@ -88,6 +116,7 @@ function send(){
   $('#ask').value=''; $('#ask').style.height='auto';
   $('#sugg').hidden=true;
   $('#send').textContent='Stop';
+  setTurnBusy(true);
 
   const sel = store.get('modelSel','cc:opus');
   const rt  = resolveModel(sel);
@@ -214,6 +243,7 @@ function send(){
         return;
       }
       if(ev.type==='model_changed'){ onModelChanged(ev.src); return; }
+      if(ev.type==='compacted'){ c.summary = ev.summary; return; }
       if(ev.type==='fatal'){
         failed = true; text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
       if(ev.type==='done' || ev.type==='closed'){
@@ -239,6 +269,7 @@ function send(){
         if(!body && !failed && ev.type==='done' && ev.code) text.innerHTML =
           '<span class="err">The agent exited with code '+ev.code+'. Check the server log.</span>';
         abort=null; $('#send').textContent='Send'; $('#msgs').scrollTop=1e9;
+        setTurnBusy(false); saveSoon();
       }
   };
 
@@ -256,6 +287,7 @@ function send(){
     abort = () => a.kill();
   } else {
     abort = api.chat({ message: v, sessionId: c.sessionId, history: c.history,
+                       sessionDirId: currentId(), resume: !!c.sessionId,
                        ...rt, scratchDir: scratchDir(), useWorkflow: useWorkflow() }, handle);
   }
 }

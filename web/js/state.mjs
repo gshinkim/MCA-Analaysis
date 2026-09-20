@@ -9,4 +9,5 @@ export const S = {
   local: null,           // /api/local/scan — runtimes found on this machine
   sessionId: null,       // agent session, kept so the chat has memory
   defaultCfg: null,      // frozen default config
+  sessionDirId: null,    // folder under workspace/runs for this session, once it exists
 };
