@@ -8,8 +8,8 @@
 export const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g, '').replace(/\s+/g, '-')
                                   .replace(/^[.\-]+|[.\-]+$/g, '').slice(0, 80);
 
-import { realpath } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
+import { realpath, readFile, writeFile, mkdir, readdir, rename, stat } from 'node:fs/promises';
+import { resolve, sep, join } from 'node:path';
 
 /* A session id is a folder name derived from something the user typed, and
    deleteSession() removes a tree. Resolve it and prove it is inside runs/ before
@@ -41,4 +41,59 @@ export async function sessionDir(runsRoot, id) {
   const real = await realpath(dir).catch(() => null);
   if (real && real !== dir && !real.startsWith(root + sep)) throw new Error('session path outside runs/');
   return dir;
+}
+
+const META = 'session.json';
+const readMeta = async dir => JSON.parse(await readFile(join(dir, META), 'utf8'));
+
+export async function listSessions(runsRoot) {
+  const entries = await readdir(runsRoot, { withFileTypes: true }).catch(() => []);
+  const out = [];
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith('.')) continue;
+    // a folder the AI made by hand, or one half-written: skip it rather than fail
+    const m = await readMeta(join(runsRoot, e.name)).catch(() => null);
+    if (!m) continue;
+    out.push({ id: e.name, name: m.name ?? e.name, created: m.created ?? 0,
+               updated: m.updated ?? 0, turns: (m.chats ?? []).reduce((n, c) => n + (c.log?.length ?? 0), 0) });
+  }
+  return out.sort((a, b) => b.updated - a.updated);
+}
+
+/** First free folder name for `want`, ignoring `keep` (the folder being renamed). */
+async function freeId(runsRoot, want, keep) {
+  for (let n = 1; n < 1000; n++) {
+    const id = n === 1 ? want : `${want}-${n}`;
+    if (id === keep) return id;
+    if (!await stat(join(runsRoot, id)).catch(() => null)) return id;
+  }
+  throw new Error('too many sessions named ' + want);
+}
+
+// the frontend's placeholder title for a session nobody has named yet
+// (web/js/main.mjs PROJ_DEF); a session still carrying it should keep its
+// date-stamped id rather than being renamed to a folder called Untitled-project
+const DEFAULT_NAME = 'Untitled project';
+
+export async function saveSession(runsRoot, { id, name, chats = [], settings = {}, model = '' }) {
+  let dir = await sessionDir(runsRoot, id);
+  const prev = await readMeta(dir).catch(() => null);
+
+  // the project name is the folder name; a rename moves the folder with it
+  const want = slug(name) || id;
+  let finalId = id;
+  if (name !== DEFAULT_NAME && want !== id) {
+    finalId = await freeId(runsRoot, want, id);
+    const target = await sessionDir(runsRoot, finalId);
+    if (await stat(dir).catch(() => null)) await rename(dir, target);
+    dir = target;
+  }
+
+  await mkdir(dir, { recursive: true });
+  const now = Date.now();
+  await writeFile(join(dir, META), JSON.stringify(
+    { name, created: prev?.created ?? now, updated: now, chats }, null, 2));
+  await writeFile(join(dir, 'model.txt'), model);
+  await writeFile(join(dir, 'settings.json'), JSON.stringify(settings, null, 2));
+  return { id: finalId };
 }

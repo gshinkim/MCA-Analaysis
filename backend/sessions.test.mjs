@@ -59,4 +59,44 @@ const CASES = [
 
 console.log('sessions containment ok');
 
+{
+  const { mkdtemp, mkdir, readFile: rf } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { listSessions, saveSession } = await import('./sessions.mjs');
+
+  const runs = join(await mkdtemp(join(tmpdir(), 'mca-')), 'runs');
+  await mkdir(runs, { recursive: true });
+
+  assert.deepEqual(await listSessions(runs), [], 'empty runs/ lists nothing');
+
+  const a = await saveSession(runs, { id: '2026-09-20', name: 'Untitled project',
+    chats: [{ id: 1, title: 'first', log: [{ q: 'hi', a: 'yo', tools: [] }], history: [] }],
+    settings: { start: 0, end: 100, points: 50 }, model: 'S1 -> S2; k*S1' });
+  assert.equal(a.id, '2026-09-20');
+
+  const saved = JSON.parse(await rf(join(runs, '2026-09-20/session.json'), 'utf8'));
+  assert.equal(saved.name, 'Untitled project');
+  assert.equal(saved.chats[0].title, 'first');
+  assert.equal(await rf(join(runs, '2026-09-20/model.txt'), 'utf8'), 'S1 -> S2; k*S1');
+  assert.equal(JSON.parse(await rf(join(runs, '2026-09-20/settings.json'), 'utf8')).points, 50);
+
+  // renaming the project renames the folder and reports the new id
+  const b = await saveSession(runs, { id: '2026-09-20', name: 'Glycolysis v2',
+    chats: [], settings: { start: 0, end: 100, points: 50 }, model: 'x' });
+  assert.equal(b.id, 'Glycolysis-v2');
+  const ids = (await listSessions(runs)).map(s => s.id);
+  assert.deepEqual(ids, ['Glycolysis-v2'], 'old folder is gone, not duplicated');
+
+  // a second session wanting the same name gets a suffix, never a silent overwrite
+  const c = await saveSession(runs, { id: '2026-09-21', name: 'Glycolysis v2',
+    chats: [], settings: {}, model: 'y' });
+  assert.equal(c.id, 'Glycolysis-v2-2');
+
+  // a stray folder with no session.json must not break the listing
+  await mkdir(join(runs, 'junk'), { recursive: true });
+  assert.equal((await listSessions(runs)).length, 2, 'junk folder skipped');
+}
+
+console.log('sessions list/save ok');
+
 console.log('sessions slug ok');
