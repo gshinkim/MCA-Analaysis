@@ -149,8 +149,11 @@ export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow
 
   const proc = spawn('claude', args, {
     cwd: root,
-    // extended thinking is off by default in print mode; the UI has a place to show it
-    env: { MAX_THINKING_TOKENS: '6000', ...process.env, ...env },
+    // extended thinking is off by default in print mode; the UI has a place to show it.
+    // Ambient shell first, then the code's own default, then the caller's own env
+    // last — so a stray MAX_THINKING_TOKENS in the parent shell can't silently beat
+    // the default, but an explicit caller override still wins over both.
+    env: { ...process.env, MAX_THINKING_TOKENS: '6000', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 
