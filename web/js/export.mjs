@@ -1,4 +1,4 @@
-import { $, css, fmt } from './util.mjs';
+import { $, css, fmt, slug } from './util.mjs';
 import { S } from './state.mjs';
 
 /* The chart is already SVG with literal colours baked into attributes, so export
@@ -51,11 +51,6 @@ export function downloadPNG(scale = 2){
   img.onerror = () => downloadSVG();          // fall back rather than fail silently
   img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
 }
-
-/* A typed project name goes straight into a filename, so strip anything a
-   filesystem or a Content-Disposition would argue about. */
-const slug = s => String(s).replace(/[\/\\:*?"<>|\x00-\x1f]/g,'').replace(/\s+/g,'-')
-                           .replace(/^[.\-]+|[.\-]+$/g,'').slice(0,80);
 
 /** The Antimony source itself — the thing Tellurium actually loads. */
 export function downloadAntimony(){
