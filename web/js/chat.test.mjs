@@ -2,7 +2,7 @@
    No DOM: pins the replay-cap decision loadChats uses to bound how many turns
    of a restored session get rendered (the DOM-touching part can't run here). */
 import assert from 'node:assert/strict';
-import { replaySlice, REPLAY_CAP, isEchoedThought, chatSnapshot, overflowCount } from './chat.mjs';
+import { replaySlice, REPLAY_CAP, isEchoedThought, chatSnapshot } from './chat.mjs';
 
 const turn = n => ({ q: 'q'+n, a: 'a'+n });
 
@@ -104,20 +104,6 @@ const turn = n => ({ q: 'q'+n, a: 'a'+n });
   assert.doesNotThrow(() => chatSnapshot([loaded]));
   const resaved = chatSnapshot([loaded]);
   assert.ok(!('summary' in resaved[0]), 'a legacy summary field must not survive a resave');
-}
-
-{
-  // The 'compacted' handler trims c.history to whatever KEEP the SERVER just used
-  // (backend/sessions.mjs's KEEP, sent over the wire as ev.keep) — never a
-  // client-side copy of the constant. Two independent literal `12`s on either
-  // side of this exact boundary were the shape of three earlier bugs on this
-  // branch, so this must be proven against a keep value that ISN'T 12 too, or a
-  // future divergence would hide behind a suite that only ever exercises 12.
-  assert.equal(overflowCount(20, 12), 8);
-  assert.equal(overflowCount(20, 5), 15);      // some OTHER server keep — not 12
-  assert.equal(overflowCount(10, 12), 0);      // already within keep: nothing to drop
-  assert.equal(overflowCount(20, undefined), 0); // no keep sent: never guess, never trim
-  assert.equal(overflowCount(20, 0), 0);
 }
 
 console.log('chat replay-cap ok');

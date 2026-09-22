@@ -318,12 +318,9 @@ const EXEC_NOTE =
   'kept in the working folder as the reproducibility record.';
 
 /* ------------------------------ the outer turn ------------------------------ */
-/* `history` and `summary` must already be split (server.mjs does this with
-   sessions.mjs's buildTurn): `history` is only the live message window, `summary`
-   only describes turns that already folded OUT of it. Handing this function the
-   full, untrimmed history AND a summary rendered from that same history is the
-   defect that made a local model loop — it saw one turn's content twice, once
-   live and once declared "settled, do not re-derive". */
+/* `summary` is the project's history.md, and on the server path `history` is empty:
+   one copy of each past turn, never two. Seeing a turn both live and declared
+   "settled, do not re-derive" is the defect that made a local model loop. */
 export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow = true,
                                liveModel = '', te, onEvent, summary = '',
                                scratch = join(root, 'workspace/runs') }) {
@@ -344,9 +341,9 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
   (async () => {
     try {
       const memory = !summary.trim() ? '' : [
-        '', '## What happened earlier in this session', '',
-        'Your own compressed record of the turns before the ones you can see.',
-        'Treat it as established; do not re-derive it.', '', summary.trim(), '',
+        '', '## Project history', '',
+        'Your own record of this project: a summary of everything older, then the',
+        'latest turns. Treat it as established; do not re-derive it.', '', summary.trim(), '',
       ].join('\n');
 
       const system = localSystem({

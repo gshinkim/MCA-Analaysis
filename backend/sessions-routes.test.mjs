@@ -45,26 +45,16 @@ try {
   assert.equal(await readFile(join(WORK, 'model.txt'), 'utf8'), 'A -> B; k*A',
                'open copies the snapshot into the live model');
 
-  // summary.md is read back by openSession, so a compacted session carries memory
-  {
-    const { writeSummary, splitHistory } = await import('./sessions.mjs');
-    await writeSummary(join(WORK, 'runs/test-abc'), 'Step 3 holds the control.');
-    const reopened = await post('/api/sessions/open', { id: 'test-abc' });
-    assert.match(reopened.summary, /Step 3 holds the control\./,
-                 'open returns the rolling summary');
-    assert.equal(splitHistory(Array.from({ length: 13 }, () => ({ role: 'user', content: 'x' })))
-                   .recent.length, 12);
-  }
-
   const bad = await post('/api/sessions/delete', { id: '../..' });
   assert.ok(bad.error, 'traversal is refused');
+  assert.ok((await post('/api/sessions/delete', { id: 'runs' })).error, 'runs/ is not a project');
 
   await post('/api/sessions/delete', { id: 'test-abc' });
   const after = await fetch(url('/api/sessions')).then(r => r.json());
   assert.ok(!after.sessions.some(s => s.id === 'test-abc'), 'deleted session is gone');
 } finally {
   srv.kill();
-  await rm(join(WORK, 'runs/test-abc'), { recursive: true, force: true });
+  await rm(join(WORK, 'test-abc'), { recursive: true, force: true });
   if (beforeModel) await writeFile(join(WORK, 'model.txt'), beforeModel);
   if (beforeSettings) await writeFile(join(WORK, 'settings.json'), beforeSettings);
 }

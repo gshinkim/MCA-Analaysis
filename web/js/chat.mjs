@@ -5,7 +5,7 @@ import { resolveModel, useWorkflow, scratchDir, openSettings } from './settings.
 import { runBrowserAgent } from './agent.mjs';
 import { renderMarkdown } from './md.mjs';
 import { downloadChat } from './export.mjs';
-import { currentId, pendingId, saveSoon, setTurnBusy, openSessionById, deleteCurrent } from './session.mjs';
+import { currentId, touch, saveNow, saveSoon, setTurnBusy, openSessionById, deleteSessionById, newProject } from './session.mjs';
 import { pickSession } from './sessionpicker.mjs';
 
 const SUGGEST = [
@@ -57,22 +57,6 @@ export function replaySlice(log, cap = REPLAY_CAP){
 // opening. Scope the check to the text since the last "— phase —" separator
 // (or the whole buffer, for the turn's first phase), i.e. what "immediately
 // preceded" this block. Pure so it can be unit-tested without a DOM.
-// How many of the OLDEST entries in c.history to drop once the server confirms
-// (over the 'compacted' event's `keep`) that it folded everything past that
-// count into summary.md. The server's number, never a client-side literal —
-// backend/sessions.mjs's KEEP and a hardcoded `12` here were exactly the two
-// disagreeing thresholds behind three earlier bugs on this branch. 0 (nothing
-// to drop) when keep is missing/0 or history is already within it: never guess.
-// Both server emit sites always send keep: KEEP today, so an undefined keep is
-// unreachable in practice; it would only show up under client/server version
-// skew, where "stop trimming" is the safe direction — don't mistake this for
-// the unbounded-history bug already fixed once on this branch.
-// Pure so it's testable without a DOM.
-export function overflowCount(historyLength, keep){
-  if(!keep || historyLength <= keep) return 0;
-  return historyLength - keep;
-}
-
 export function isEchoedThought(thoughts, text){
   const t = (text || '').trim();
   if(!t) return false;
@@ -131,8 +115,8 @@ function makeChat(){
   chats.push(c);
   show(c.id);
   bubble('ai','I read and edit the model in the editor, run Tellurium, and route every '+
-              'analysis through the <code>mca-tellurium</code> workflow. I remember this '+
-              'conversation until the page is closed.');
+              'analysis through the <code>mca-tellurium</code> workflow. I keep this '+
+              'project’s history in its folder, so it is still there when you Load it again.');
   return c;
 }
 
@@ -313,22 +297,6 @@ function send(){
         return;
       }
       if(ev.type==='model_changed'){ onModelChanged(ev.src); return; }
-      if(ev.type==='compacted'){
-        // The server just folded the older turns into summary.md (server-side —
-        // there is no client-side copy of that memory) — those turns' content
-        // lives there now, so trim the client's history to match. Trimming
-        // unconditionally (as this used to do, before every send) fed the server
-        // a payload that could never exceed the keep window, so the server could
-        // never see more either — it always took the 'record' branch and
-        // compression never ran. Trimming only here, after the server confirms it
-        // actually folded something, is what makes the turn after the window
-        // reach the server whole enough to fold in the first place. `ev.keep` is
-        // the server's own KEEP constant, sent over the wire rather than
-        // re-declared here as a literal that could drift from it.
-        const drop = overflowCount(c.history.length, ev.keep);
-        if(drop) c.history.splice(0, drop);
-        return;
-      }
       if(ev.type==='fatal'){
         failed = true; text.innerHTML = '<span class="err">'+esc(ev.error)+'</span>'; return; }
       if(ev.type==='done' || ev.type==='closed'){
@@ -342,9 +310,9 @@ function send(){
           c.history.push({ role:'user', content: v });
           c.history.push({ role:'assistant', content: (body || '(no answer)') +
             (acts.length ? '\n\n[tools used this turn: '+acts.join(', ')+']' : '') });
-          // No trim here: the server needs the full history to know when 12 is
-          // crossed and something needs folding (see the 'compacted' handler
-          // above, which is where the trim actually happens).
+          // The server path keeps memory in history.md and never reads this; only the
+          // hosted in-browser agent does, so keep it bounded.
+          if(c.history.length > 24) c.history.splice(0, c.history.length - 24);
         }
         if(thoughts && !think.classList.contains('done')){
           const secs = Math.max(1, Math.round((Date.now()-started)/1000));
@@ -371,9 +339,17 @@ function send(){
     });
     abort = () => a.kill();
   } else {
-    abort = api.chat({ message: v, sessionId: c.sessionId, history: c.history,
-                       sessionDirId: pendingId(), resume: !!c.sessionId,
-                       ...rt, scratchDir: scratchDir(), useWorkflow: useWorkflow() }, handle);
+    // Save first: the turn's memory (history.md) and files go in the project's folder,
+    // which must exist — and have its final name — before the agent starts.
+    let stopped = false;
+    abort = () => { stopped = true; handle({ type: 'closed' }); };
+    touch();
+    saveNow().finally(() => {
+      if(stopped) return;
+      abort = api.chat({ message: v, sessionId: c.sessionId, sessionDirId: currentId(),
+                         resume: !!c.sessionId, ...rt, scratchDir: scratchDir(),
+                         useWorkflow: useWorkflow() }, handle);
+    });
   }
 }
 
@@ -416,31 +392,35 @@ export function initChat(){
   $('#chatClose').onclick=()=>toggleChat(false);
   $('#newChat').onclick = ()=>{ if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
                                makeChat(); $('#ask').focus(); };
-  $('#openSession').onclick = async () => {
+  const stop = () => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; } };
+  $('#newProject').onclick = async () => {
+    stop();
+    await newProject();
+    onSessionDeleted(); loadChats([]);     // clean Untitled project; the editor keeps its model, as a reload does
+  };
+  $('#loadSession').onclick = async () => {
     const id = await pickSession();
     if(!id) return;
-    if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
+    stop();
     try { await openSessionById(id); }
-    catch(e){ alert('Could not open that session: ' + e.message); }
+    catch(e){ alert('Could not open that project: ' + e.message); }
   };
-  $('#delSession').onclick = async () => {
-    const id = currentId();
-    if(!id) return flash($('#delSession'), '—');
-    if(!confirm('Delete this session?\n\nThis removes workspace/runs/' + id +
-                ' and everything in it — the conversation, the model snapshot and every '+
-                'file the AI wrote. This cannot be undone.')) return;
-    if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
-    // Belt-and-braces alongside session.mjs's own reentrancy counter: disabled while
-    // in flight so a second confirm() dialog can't even be opened for this session.
-    $('#delSession').disabled = true;
-    try {
-      const r = await deleteCurrent();
-      if(r.error) return alert('Could not delete: ' + r.error);
-      onSessionDeleted();          // back to a clean Untitled project — nothing left to regenerate it
-      loadChats([]);
-    } finally {
-      $('#delSession').disabled = false;
+  $('#delProjects').onclick = async () => {
+    const ids = await pickSession({ mode: 'delete' });
+    if(!ids?.length) return;
+    if(!confirm('Delete ' + (ids.length === 1 ? 'this project' : ids.length + ' projects') + '?\n\n' +
+                ids.map(id => 'workspace/' + id).join('\n') + '\n\nEach folder goes with everything in '+
+                'it — the conversation, history.md, the model snapshot and every file the AI wrote. '+
+                'This cannot be undone.')) return;
+    const failed = [];
+    for(const id of ids){
+      const isCurrent = id === currentId();
+      if(isCurrent) stop();
+      const r = await deleteSessionById(id);
+      if(r.error){ failed.push(id + ': ' + r.error); continue; }
+      if(isCurrent){ onSessionDeleted(); loadChats([]); }  // back to a clean, untouched Untitled project
     }
+    if(failed.length) alert('Could not delete:\n' + failed.join('\n'));
   };
   $('#chatPick').onchange = e => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
                                    show(+e.target.value); };

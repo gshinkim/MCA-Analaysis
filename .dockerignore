@@ -1,6 +1,8 @@
 .venv
 .git
 node_modules
-workspace/runs
+workspace/*
+!workspace/model.txt
+!workspace/settings.json
 *.log
 .DS_Store

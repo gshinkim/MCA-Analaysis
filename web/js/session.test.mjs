@@ -3,27 +3,40 @@
 import assert from 'node:assert/strict';
 import { slug } from './util.mjs';
 import { S } from './state.mjs';
-import { defaultId, worthSaving, initSession, saveSoon, deleteCurrent } from './session.mjs';
+import { worthSaving, initSession, saveSoon, saveNow, deleteCurrent, newProject } from './session.mjs';
 
 {
-  // an unnamed project is filed under the date; a named one under its name
-  assert.match(defaultId('Untitled project', new Date('2026-09-20T10:00:00Z')), /^2026-09-20$/);
-  assert.match(defaultId('', new Date('2026-09-20T10:00:00Z')), /^2026-09-20$/);
-  assert.equal(defaultId('Glycolysis v2', new Date('2026-09-20T10:00:00Z')), 'Glycolysis-v2');
-  // a name that slugs away to nothing falls back to the date too
-  assert.match(defaultId('...', new Date('2026-09-20T10:00:00Z')), /^2026-09-20$/);
-  assert.equal(slug('Glycolysis v2'), 'Glycolysis-v2');
+  // untouched and never saved: closing the page must leave nothing behind
+  assert.equal(worthSaving(null, false), false);
+  // the first touch saves; an existing project always saves
+  assert.equal(worthSaving(null, true), true);
+  assert.equal(worthSaving('Glycolysis-v2', false), true);
+  assert.equal(slug('Untitled project'), 'Untitled-project');
 }
 
 {
-  // no folder yet and nothing completed: a delete's async 'closed' path must
-  // not resurrect the folder it just removed
-  assert.equal(worthSaving(null, [{ log: [] }]), false);
-  assert.equal(worthSaving(null, []), false);
-  // no folder yet, but a turn completed: first-save lazy creation proceeds
-  assert.equal(worthSaving(null, [{ log: [{ q: 'x', a: 'y' }] }]), true);
-  // an existing session always saves, even mid-edit with empty chats
-  assert.equal(worthSaving('Glycolysis-v2', []), true);
+  // THE "NOTHING SAVES" BUG: editing the model or renaming (no chat turn at all)
+  // must create the project's folder. The first save is `fresh` so the server
+  // claims a new folder instead of writing into another project's.
+  let name = 'Untitled project';
+  initSession({ getName: () => name, getModel: () => 'S1 -> S2; k*S1', getSettings: () => ({}),
+                getChats: () => [], setAll: () => {} });
+  const calls = [];
+  globalThis.fetch = (path, opts) => {
+    const body = JSON.parse(opts.body);
+    calls.push(body);
+    return Promise.resolve({ json: async () => ({ id: body.fresh ? 'Untitled-project-2' : body.id }) });
+  };
+  S.sessionDirId = null;
+  assert.equal(await saveNow(), null, 'untouched: no save');
+  saveSoon();                                       // what a model edit / rename does
+  saveNow();                                        // lands while the debounced one is pending: only ONE may be fresh
+  await new Promise(r => setTimeout(r, 900));
+  assert.deepEqual(calls.map(c => [c.id, c.fresh]),
+                   [['Untitled-project', true], ['Untitled-project-2', false]]);
+  assert.equal(S.sessionDirId, 'Untitled-project-2');
+  delete globalThis.fetch;
+  S.sessionDirId = null;
 }
 
 {
@@ -115,6 +128,28 @@ import { defaultId, worthSaving, initSession, saveSoon, deleteCurrent } from './
     'no save may land after both deletes settle either');
 
   delete globalThis.fetch;
+}
+
+{
+  // NEW PROJECT: the old project's pending edit lands in ITS folder, then the page is an
+  // untouched Untitled project that creates nothing until it is touched
+  initSession({ getName: () => 'Untitled project', getModel: () => 'm', getSettings: () => ({}),
+                getChats: () => [], setAll: () => {} });
+  const calls = [];
+  globalThis.fetch = (path, opts) => { const b = JSON.parse(opts.body); calls.push(b);
+    return Promise.resolve({ json: async () => ({ id: b.fresh ? 'Untitled-project-3' : b.id }) }); };
+  S.sessionDirId = 'Old-project';
+  saveSoon();                                       // an edit, still inside the debounce
+  await newProject();
+  assert.deepEqual(calls.map(c => c.id), ['Old-project'], 'pending save flushed to the old folder');
+  assert.equal(S.sessionDirId, null);
+  assert.equal(await saveNow(), null, 'untouched new project: no folder');
+  saveSoon();
+  await new Promise(r => setTimeout(r, 900));
+  assert.deepEqual(calls.at(-1), { ...calls.at(-1), fresh: true, id: 'Untitled-project' });
+  assert.equal(S.sessionDirId, 'Untitled-project-3');
+  delete globalThis.fetch;
+  S.sessionDirId = null;
 }
 
 console.log('session id ok');

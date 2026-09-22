@@ -283,7 +283,7 @@ setOnSessionDeleted(()=> setProjName(PROJ_DEF));
     // the picker is built before this resolves, and on a hosted deployment the
     // built-in Claude models must drop out of it
     S.env = e; refreshEnv(); fillModels(); offerScratchSetup();
-    if(e.hosted) ['#openSession','#delSession'].forEach(s => $(s).hidden = true);
+    if(e.hosted) ['#newProject','#loadSession','#delProjects'].forEach(s => $(s).hidden = true);
     if(!e.telluriumInstalled) status('err','Tellurium not installed — run: bash setup.sh');
     if(e.claude.error) $('#aiBar').title = e.claude.error;
   });

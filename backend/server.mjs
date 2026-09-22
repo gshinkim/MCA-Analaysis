@@ -10,8 +10,7 @@ import { runAgent, toUiEvent } from './agent.mjs';
 import { runLocalAgent, Chat } from './local-agent.mjs';
 import { homedir } from 'node:os';
 import { listSessions, saveSession, openSession, deleteSession,
-         sessionDir, readSummary, writeSummary, buildTurn, summaryPrompt,
-         summaryStrategy, trimRecord, appendThinking, KEEP } from './sessions.mjs';
+         sessionDir, readHistory, appendHistory, turnLines, compactPrompt } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -57,6 +56,24 @@ async function body(req, limit = 4e6) {
   if (!chunks.length) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
   catch { throw new Error('invalid JSON body'); }
+}
+
+/* One history.md fold: ~1000 words -> ~200, by the model the user is already using.
+   Claude Code has no plain completion endpoint, so it gets a one-shot `claude -p`. */
+async function compactWith({ runtime, chatCfg, model }, summary, batch) {
+  const [sys, user] = compactPrompt(summary, batch);
+  if (runtime === 'openai')
+    return (await new Chat(chatCfg).complete({ messages: [sys, user], maxTokens: 800 })).content;
+  return new Promise((ok, fail) => {
+    const p = spawn('claude', ['-p', user.content, '--append-system-prompt', sys.content,
+                               '--setting-sources', 'project', ...(model ? ['--model', model] : [])],
+                    { cwd: ROOT, stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    p.stdout.setEncoding('utf8').on('data', d => (out += d));
+    const t = setTimeout(() => p.kill(), 120_000);
+    p.on('error', fail);
+    p.on('close', code => { clearTimeout(t); code === 0 ? ok(out) : fail(new Error('claude -p exited ' + code)); });
+  });
 }
 
 async function ensureWorkspace() {
@@ -215,20 +232,20 @@ const routes = {
     catch (e) { json(res, 200, { ok: false, error: String(e.message || e) }); }
   },
 
-  /* Sessions. One folder each under workspace/runs/; the directory listing is the
-     session list. Hosted deployments have no local folder to keep them in. */
+  /* Sessions. One folder per project directly under workspace/; the directory
+     listing is the session list. Hosted deployments have no local folder to keep them in. */
   'GET /api/sessions': async (req, res) => {
     if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
     await ensureWorkspace();
-    json(res, 200, { sessions: await listSessions(RUNS) });
+    json(res, 200, { sessions: await listSessions(WORK) });
   },
 
   'POST /api/sessions/save': async (req, res) => {
     if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
-    const { id, name, chats, settings, model } = await body(req);
+    const { id, name, fresh, chats, settings, model } = await body(req);
     if (!id) return json(res, 400, { error: 'id is required' });
     await ensureWorkspace();
-    try { json(res, 200, await saveSession(RUNS, { id, name, chats, settings, model })); }
+    try { json(res, 200, await saveSession(WORK, { id, name, fresh, chats, settings, model })); }
     catch (e) { json(res, 400, { error: String(e.message || e) }); }
   },
 
@@ -237,7 +254,7 @@ const routes = {
     const { id } = await body(req);
     await ensureWorkspace();
     let s;
-    try { s = await openSession(RUNS, id); }
+    try { s = await openSession(WORK, id); }
     catch (e) { return json(res, 400, { error: String(e.message || e) }); }
     // the snapshot becomes the live model the agent reads and the editor shows
     if (s.model) await writeFile(MODEL_FILE, s.model);
@@ -249,7 +266,7 @@ const routes = {
   'POST /api/sessions/delete': async (req, res) => {
     if (HOSTED) return json(res, 400, { error: 'sessions are local-only' });
     const { id } = await body(req);
-    try { await deleteSession(RUNS, id); json(res, 200, { ok: true }); }
+    try { await deleteSession(WORK, id); json(res, 200, { ok: true }); }
     catch (e) { json(res, 400, { error: String(e.message || e) }); }
   },
 
@@ -293,7 +310,7 @@ const routes = {
 
   /* Server-sent events: one agent turn, streamed. */
   'POST /api/chat': async (req, res) => {
-    const { message, sessionId, sessionDirId, model, env, runtime, chatCfg, history,
+    const { message, sessionId, sessionDirId, model, env, runtime, chatCfg,
             scratchDir, useWorkflow = true, resume = false } = await body(req);
     if (!message?.trim()) return json(res, 400, { error: 'message is empty' });
     if (HOSTED) return json(res, 400, { error:
@@ -313,21 +330,13 @@ const routes = {
       ' — pick another in Settings, or clear it to use the default.' }); }
     const before = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
 
-    // The session's own folder is where its memory and its scratch both live.
+    // The project's own folder is where its memory (history.md) and its scratch live.
+    // history.md is the whole memory: it goes in the system prompt, and the model gets
+    // no separate message history — one copy of each turn, never two.
     let sdir = null;
-    if (sessionDirId) sdir = await sessionDir(RUNS, sessionDirId).catch(() => null);
-    const summary = sdir ? await readSummary(sdir) : '';
+    if (sessionDirId) sdir = await sessionDir(WORK, sessionDirId).catch(() => null);
+    const memory = sdir ? await readHistory(sdir) : '';
     if (sdir) { await mkdir(sdir, { recursive: true }); scratch = sdir; }
-
-    // The client now sends its whole history (it no longer pre-truncates), so this
-    // is the one place that splits it: `recent` is what the model sees as live
-    // messages, `fold` is what just aged out of that window (compressed/recorded
-    // into summary.md below), and `inject` is what goes in the system prompt this
-    // turn — the summary already on disk, never the live window. Mixing the two
-    // (a turn's content present in both) is exactly the contradiction that sent a
-    // local model into a loop: told a turn was old and settled while also handed
-    // it live.
-    const { messages: recent, fold, inject } = buildTurn(history, summary);
 
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8',
                          'cache-control': 'no-cache', connection: 'keep-alive',
@@ -335,11 +344,10 @@ const routes = {
     const send = o => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(o)}\n\n`); };
     const ka = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
 
-    // Accumulated across the whole turn, written to thinking.md when it ends. Mirrors
-    // the dedup web/js/chat.mjs does for the same whole-vs-delta duplication: a
+    // Accumulated across the whole turn, appended to history.md when it ends. A
     // whole-block re-send (Claude Code's final assistant message) repeats what the
-    // deltas already streamed, so drop it rather than doubling the text on disk.
-    let thoughts = '';
+    // deltas already streamed, so drop it rather than doubling the text.
+    let thoughts = '', answer = '';
 
     const onEvent = async raw => {
         const ev = runtime === 'openai' ? raw : toUiEvent(raw);
@@ -347,66 +355,18 @@ const routes = {
         if (ev?.type === 'thinking' && ev.text &&
             !(ev.whole && thoughts.includes(ev.text.trim().slice(0, 60))))
           thoughts += (ev.whole && thoughts && !thoughts.endsWith('\n') ? '\n\n' : '') + ev.text;
+        if (ev?.type === 'delta' && ev.text) answer += ev.text;
+        if (ev?.type === 'result' && ev.text) answer = ev.text;
         if (raw.type === 'done') {
           // compare content, not mtime — the editor autosaves during a turn
           const after = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
           if (after !== before) send({ type: 'model_changed', src: after, version: await modelVersion() });
 
-          /* summary.md is written every turn a session folder exists, for every
-             runtime — but only ever describes turns that just folded OUT of the
-             live window (`fold`, above), never the window itself. 'record'
-             (nothing folded yet, short history) only creates the file if it
-             doesn't already hold real content — the whole conversation is still
-             live, so there's nothing NEW to remember, but a prior compaction's
-             content must survive every 'record' turn that follows it. 'compress'
-             folds `fold` into the running summary through
-             the model already in use when there's a cheap completion endpoint for
-             it (OpenAI-compatible). 'trim' (Claude Code, no cheap completion
-             endpoint) records the same `fold` verbatim-but-bounded instead of
-             model-compressed — it must never include the live window either:
-             that window is already sent as `messages` this turn, and injecting
-             it too is exactly the duplication that sent a local model into a
-             loop. summary.md is Claude Code's only portable memory when
-             --resume isn't available, but portable memory means the turns no
-             longer in context, not a second copy of the ones that are. */
+          // Persisting memory must never fail the turn.
           if (sdir) try {
-            const strategy = summaryStrategy(history?.length, runtime === 'openai' && !!chatCfg);
-            if (strategy === 'compress') {
-              if (fold.length) {
-                const chat = new Chat(chatCfg);
-                const msg = await chat.complete({ messages: summaryPrompt(summary, fold),
-                                                  maxTokens: 900 });
-                if (msg.content?.trim()) {
-                  await writeSummary(sdir, msg.content.trim());
-                  send({ type: 'compacted', summary: msg.content.trim(), keep: KEEP });
-                }
-              }
-            } else if (strategy === 'trim') {
-              const text = trimRecord(fold);
-              await writeSummary(sdir, text);
-              // Claude Code never gets a 'compacted' event otherwise (that's only sent
-              // from the 'compress' branch above), so its client-side history grows
-              // unboundedly and eventually blows the request body limit. Sending the
-              // same event here lets chat.mjs's existing handler trim c.history the
-              // same way it already does for the compress runtime — only after this
-              // fold is actually written to disk, never before (see the comment on
-              // the client's 'compacted' handler for why that order matters).
-              send({ type: 'compacted', summary: text, keep: KEEP });
-            } else if (!summary?.trim()) {
-              // 'record': nothing folded this turn, so there is nothing new to write —
-              // but writing unconditionally here used to overwrite whatever the LAST
-              // compaction (compress or trim) had just written, every single turn
-              // after any compaction, because the client trims history back down to
-              // exactly KEEP right after a fold and the next turn's historyLength <=
-              // KEEP reads as 'record' again. Only create the file when it doesn't
-              // already hold real content; never blow away memory that's already there.
-              await writeSummary(sdir, '');
-            }
-          } catch (e) { console.error('[summary]', e.message); }  // never fail the turn
-
-          // Same rule: persisting the turn's reasoning must never fail the turn.
-          if (sdir && thoughts.trim()) try { await appendThinking(sdir, message, thoughts); }
-          catch (e) { console.error('[thinking]', e.message); }
+            await appendHistory(sdir, turnLines(message, thoughts, answer),
+                                (sum, batch) => compactWith({ runtime, chatCfg, model }, sum, batch));
+          } catch (e) { console.error('[history]', e.message); }
 
           clearInterval(ka);
           if (!res.writableEnded) res.end();
@@ -416,10 +376,10 @@ const routes = {
     // any throw from here on must still reach the browser as an SSE frame
     process.nextTick(() => {});
     const run = runtime === 'openai'
-      ? runLocalAgent({ root: ROOT, prompt: message, history: recent, chatCfg,
-                        useWorkflow, liveModel: before, te, scratch, summary: inject, onEvent })
+      ? runLocalAgent({ root: ROOT, prompt: message, chatCfg,
+                        useWorkflow, liveModel: before, te, scratch, summary: memory, onEvent })
       : runAgent({ root: ROOT, prompt: message, sessionId, model, env: env || {},
-                   useWorkflow, liveModel: before, scratch, summary: inject, resume, onEvent });
+                   useWorkflow, liveModel: before, scratch, summary: memory, resume, onEvent });
     send({ type: 'session', sessionId: run.sessionId ?? sessionId ?? null, runtime: runtime || 'claude-code' });
     req.on('close', () => { clearInterval(ka); run.kill(); });
   },

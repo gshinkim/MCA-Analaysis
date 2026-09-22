@@ -28,7 +28,7 @@ const base = { root: '/tmp/app', prompt: 'hi', sid: 'abc-123', model: '',
 {
   const none = buildArgs({ ...base, resuming: false, summary: '' });
   const appended = none[none.indexOf('--append-system-prompt') + 1];
-  assert.doesNotMatch(appended, /earlier in this session/i, 'no empty summary block');
+  assert.doesNotMatch(appended, /Project history/, 'no empty history block');
 }
 
 console.log('agent args ok');

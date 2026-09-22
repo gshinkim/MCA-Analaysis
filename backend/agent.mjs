@@ -88,15 +88,15 @@ create belongs anywhere else. Write to it by absolute path. It is the user's fol
 so leave it readable: name files for what they are, not run-1234567890.py.
 The live model stays at workspace/model.txt - that one is still edited in place.`;
 
-/* The rolling memory of everything older than the last twelve messages. Inlined
-   rather than pointed at: a model that has to call a tool to find its own memory
-   is a model that will sometimes not bother. */
+/* The project's history.md. Inlined rather than pointed at: a model that has to
+   call a tool to find its own memory is a model that will sometimes not bother. */
 export const summaryBlock = text => !text?.trim() ? '' : `
 
-## What happened earlier in this session
+## Project history
 
-This is your own compressed record of the turns before the ones you can see.
-Treat it as established, and do not re-derive it.
+Your own record of this project: a summary of everything older, then the
+latest turns (what was asked, how you reasoned, what you answered). Treat it as
+established, and do not re-derive it.
 
 ${text.trim()}
 `;

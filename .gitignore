@@ -1,4 +1,8 @@
 .venv/
+workspace/*
+!workspace/model.txt
+!workspace/settings.json
+!workspace/runs/
 workspace/runs/*
 !workspace/runs/.gitkeep
 node_modules/

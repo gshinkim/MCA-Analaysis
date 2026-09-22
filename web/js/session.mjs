@@ -1,21 +1,11 @@
 import { S } from './state.mjs';
 import { slug } from './util.mjs';
 
-/* A session is a folder under workspace/runs/. The folder is created lazily — on
-   the first save, not on page load — so refreshing the page does not litter runs/
-   with empty dated folders. */
+/* A project is a folder under workspace/. It is created on the first touch (an edit,
+   a rename, a chat) — never on page load, so a project opened and closed untouched
+   leaves nothing behind. */
 
 const DEFAULT_NAME = 'Untitled project';
-
-/** Folder name for a project: its slug, or today's date while it is still unnamed. */
-export function defaultId(projectName, now = new Date()) {
-  const s = slug(projectName ?? '');
-  if (!s || s === slug(DEFAULT_NAME)) {
-    const p = n => String(n).padStart(2, '0');
-    return `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}`;
-  }
-  return s;
-}
 
 const post = (path, body) => fetch(path, { method: 'POST',
   headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(r => r.json());
@@ -31,26 +21,26 @@ export function initSession(hooks) { ({ getName, getModel, getSettings, getChats
 
 export const currentId = () => S.sessionDirId;
 
-/** The folder id this session will land in, even before any save has happened —
-    the same fallback saveNow() uses. Turn 1 needs this so the server has an sdir
-    to write summary.md/thinking.md into from the very first turn, instead of only
-    from the second turn onward once currentId() finally has a real value. */
-export const pendingId = () => S.sessionDirId ?? defaultId(getName());
+/* Nothing has been touched and no folder exists: saving would create a folder for
+   an untouched project. Also what stops a just-deleted project coming back from a
+   stray save — deleteCurrent() clears `touched` along with the folder id. */
+let touched = false;
+export const touch = () => { touched = true; };
+export const worthSaving = (sessionDirId, isTouched) => sessionDirId != null || !!isTouched;
 
-/** No folder exists yet, and nothing in any chat is worth creating one for.
-    Guards saveNow against recreating a just-deleted session: once a turn
-    completes, its chat gets a log entry and saving proceeds normally. */
-export function worthSaving(sessionDirId, chats) {
-  return sessionDirId != null || (chats ?? []).some(c => c?.log?.length > 0);
-}
+/* Saves run one at a time: two first-saves in flight together would each claim a
+   folder, leaving a stray Untitled-project-2 behind. */
+let chain = Promise.resolve();
+export const saveNow = () => (chain = chain.then(doSave, doSave));
 
-export async function saveNow() {
+async function doSave() {
   if (S.env?.hosted) return null;
-  if (!worthSaving(S.sessionDirId, getChats())) return null;
-  const id = S.sessionDirId ?? defaultId(getName());
-  const r = await post('/api/sessions/save', { id, name: getName(), chats: getChats(),
+  if (!worthSaving(S.sessionDirId, touched)) return null;
+  const fresh = S.sessionDirId == null;
+  const id = S.sessionDirId ?? (slug(getName()) || slug(DEFAULT_NAME));
+  const r = await post('/api/sessions/save', { id, fresh, name: getName(), chats: getChats(),
                                                settings: getSettings(), model: getModel() });
-  if (r.id) S.sessionDirId = r.id;      // a rename comes back with the new folder name
+  if (r.id) S.sessionDirId = r.id;      // a new folder or a rename comes back with its name
   return r;
 }
 
@@ -66,6 +56,7 @@ export async function saveNow() {
 let t = null, busy = false, pending = false, scheduled = false, deleting = 0;
 export function saveSoon() {
   if (deleting > 0) return;             // a delete is in flight — never arm a save for it
+  touch();                              // every caller is a user action
   clearTimeout(t);
   scheduled = true;
   t = setTimeout(() => { scheduled = false; if (busy) { pending = true; return; } saveNow(); }, 800);
@@ -103,16 +94,31 @@ export async function openSessionById(id) {
   return r;
 }
 
-export async function deleteCurrent() {
-  const id = S.sessionDirId;
+/** Start a new, untouched Untitled project — what a page reload used to be for.
+    The old project's pending save lands in ITS folder first; nothing is created
+    for the new one until it is touched. */
+export async function newProject() {
+  await flushPending();
+  S.sessionDirId = null;
+  touched = false;
+}
+
+/** Delete any saved project. Deleting the open one also forgets it, so the page is
+    back to an untouched Untitled project that will not recreate the folder. */
+export async function deleteSessionById(id) {
   if (!id) return { ok: true };
-  deleting++;                           // block saveSoon()/setTurnBusy() from arming a save until this settles
-  cancelPending();                      // a save already armed for THIS id must not race the delete below
+  const isCurrent = id === S.sessionDirId;
+  if (isCurrent) {
+    deleting++;                         // block saveSoon()/setTurnBusy() from arming a save until this settles
+    cancelPending();                    // a save already armed for THIS id must not race the delete below
+  }
   try {
     const r = await post('/api/sessions/delete', { id });
-    if (!r.error) S.sessionDirId = null;
+    if (!r.error && isCurrent) { S.sessionDirId = null; touched = false; }
     return r;
   } finally {
-    deleting--;
+    if (isCurrent) deleting--;
   }
 }
+
+export const deleteCurrent = () => deleteSessionById(S.sessionDirId);

@@ -1,6 +1,6 @@
-/* Sessions on disk. One folder per session under workspace/runs/, holding the
-   conversation, a snapshot of the model and settings, the rolling summary, and
-   whatever files the AI wrote. The folder list IS the session list — there is no
+/* Sessions on disk. One folder per project directly under workspace/, holding the
+   conversation, a snapshot of the model and settings, history.md (the agents'
+   memory), and whatever files the AI wrote. The folder list IS the session list — there is no
    index to fall out of sync with the directory. */
 
 /** Filesystem-safe name. Must stay identical to slug() in web/js/util.mjs;
@@ -72,7 +72,7 @@ export async function listSessions(runsRoot) {
     already-saved session); a session that was never saved claims the target
     directly via mkdir. */
 async function claimId(runsRoot, want, keep, srcDir) {
-  const srcExists = !!(await stat(srcDir).catch(() => null));
+  const srcExists = !!srcDir && !!(await stat(srcDir).catch(() => null));
   for (let n = 1; n < 1000; n++) {
     const id = n === 1 ? want : `${want}-${n}`;
     if (id === keep) return { id, dir: srcDir };
@@ -81,37 +81,32 @@ async function claimId(runsRoot, want, keep, srcDir) {
       if (srcExists) await rename(srcDir, target); else await mkdir(target);
       return { id, dir: target };
     } catch (err) {
-      if (err.code === 'EEXIST' || err.code === 'ENOTEMPTY') continue; // taken since the check — try the next id
+      if (['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].includes(err.code)) continue; // taken since the check — try the next id
       throw err;
     }
   }
   throw new Error('too many sessions named ' + want);
 }
 
-// the frontend's placeholder title for a session nobody has named yet
-// (web/js/main.mjs PROJ_DEF); a session still carrying it should keep its
-// date-stamped id rather than being renamed to a folder called Untitled-project
-const DEFAULT_NAME = 'Untitled project';
-// case/whitespace-insensitive: 'untitled project', 'Untitled Project' and
-// ' Untitled project ' are all still semantically the unnamed placeholder even
-// though saveSession is a server API and nothing guarantees the frontend's
-// exact casing/trim reaches it
-const isPlaceholder = name => String(name ?? '').trim().toLowerCase() === DEFAULT_NAME.toLowerCase();
-
-export async function saveSession(runsRoot, { id, name, chats = [], settings = {}, model = '' }) {
+/* `fresh` is a project's first save: it claims its own folder (Untitled-project,
+   Untitled-project-2, …) instead of writing into whatever already has that name.
+   After that, the folder only moves when the name actually changes. */
+export async function saveSession(runsRoot, { id, name, fresh = false, chats = [], settings = {}, model = '' }) {
   let dir = await sessionDir(runsRoot, id);
-  const prev = await readMeta(dir).catch(() => null);
+  const prev = fresh ? null : await readMeta(dir).catch(() => null);
 
-  // the project name is the folder name; a rename moves the folder with it
-  const want = slug(name) || id;
   let finalId = id;
-  if (!isPlaceholder(name) && want !== id) {
-    const claim = await claimId(runsRoot, want, id, dir);
+  if (fresh || (prev && prev.name !== name)) {
+    const claim = await claimId(runsRoot, slug(name) || 'Untitled-project', fresh ? null : id,
+                                fresh ? null : dir);
     finalId = claim.id;
     dir = claim.dir;
   }
 
   await mkdir(dir, { recursive: true });
+  // history.md exists from the project's first save, not only after its first AI turn
+  await writeFile(join(dir, HISTORY), renderHistory({ summary: '', lines: [] }), { flag: 'wx' })
+    .catch(e => { if (e.code !== 'EEXIST') throw e; });
   const now = Date.now();
   await writeFile(join(dir, META), JSON.stringify(
     { name, created: prev?.created ?? now, updated: now, chats }, null, 2));
@@ -125,8 +120,6 @@ export async function saveSession(runsRoot, { id, name, chats = [], settings = {
   return { id: finalId };
 }
 
-export const SUMMARY = 'summary.md';
-
 export async function openSession(runsRoot, id) {
   const dir = await sessionDir(runsRoot, id);
   const m = await readMeta(dir);          // no session.json means no session: let it throw
@@ -135,155 +128,83 @@ export async function openSession(runsRoot, id) {
   return {
     id, name: m.name ?? id, chats: m.chats ?? [],
     model: await read('model.txt', ''),
-    summary: await read(SUMMARY, ''),
     settings: (() => { try { return JSON.parse(settings); } catch { return {}; } })(),
   };
 }
 
+/* Sessions share workspace/ with model.txt, settings.json and runs/. Only a folder
+   holding a session.json is a session, so nothing else there can be deleted by id. */
 export async function deleteSession(runsRoot, id) {
-  await rm(await sessionDir(runsRoot, id), { recursive: true, force: true });
+  const dir = await sessionDir(runsRoot, id);
+  await readMeta(dir);
+  await rm(dir, { recursive: true, force: true });
 }
 
-export const readSummary = async dir => readFile(join(dir, SUMMARY), 'utf8').catch(() => '');
-export const writeSummary = async (dir, text) => {
-  await mkdir(dir, { recursive: true });
-  await writeFile(join(dir, SUMMARY), text);
+/* ---------------- history.md: the agents' whole memory of a project ----------------
+   One line per entry (what the user asked, how the agent reasoned, what it answered),
+   under a single summary. Once the file reaches COMPACT_WORDS, the AI folds the
+   summary and every line into a new ~SUMMARY_WORDS summary, and the loop starts
+   again — history is carried forward, and the file (and the prompt it is inlined
+   into) stays bounded no matter how long the project runs. */
+export const HISTORY = 'history.md';
+export const COMPACT_WORDS = 1000;
+export const SUMMARY_WORDS = 200;
+// One entry this long is a runaway, not a turn; the fold would shrink it anyway.
+const LINE_CAP = 20_000;
+const SUMMARY_TAG = '**Summary so far:** ';
+
+export const words = s => String(s ?? '').split(/\s+/).filter(Boolean).length;
+
+export const oneLine = (s, cap = LINE_CAP) => {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return t.length > cap ? t.slice(0, cap) + '…' : t;
 };
 
-export const THINKING = 'thinking.md';
-// Chars of reasoning kept per turn. Bounds a runaway reasoning model — not a token
-// budget, just a ceiling so one turn can't write an unbounded file to disk.
-export const THINK_CAP = 8000;
-// Chars kept for the WHOLE file. Without this, appendFile grows thinking.md by up
-// to THINK_CAP every single turn forever. 200,000 is ~25 turns at the per-turn cap
-// — enough that a human reviewing a session still finds real recent context, small
-// enough that opening the file in an editor stays instant.
-export const THINKING_TOTAL_CAP = 200_000;
-
-const DROPPED_NOTE = '_(earlier reasoning was dropped to keep this file bounded)_\n\n';
-
-/** Split thinking.md's text into its `## <timestamp> — <prompt>` blocks (the
-    heading renderThinking emits), each running up to the next heading or EOF.
-    Strips the dropped-note line first, if present, so it is never mistaken
-    for part of a block. Pure — no I/O. */
-function thinkingBlocks(text) {
-  const body = text.startsWith(DROPPED_NOTE) ? text.slice(DROPPED_NOTE.length) : text;
-  return body.split(/(?=^## )/m).filter(b => b.trim());
+export function turnLines(prompt, thinking, answer) {
+  return [['user', prompt], ['thinking', thinking], ['assistant', answer]]
+    .filter(([, t]) => String(t ?? '').trim())
+    .map(([who, t]) => `- **${who}:** ${oneLine(t)}`);
 }
 
-/** Bound thinking.md to `cap` total characters by dropping the OLDEST whole
-    blocks — never the newest (`newBlock`, always kept in full even if that
-    alone exceeds `cap`), never mid-block. Once anything has ever been
-    dropped, a note is kept at the top saying so — recomputed fresh each
-    call, so it is never duplicated by repeated trims. Pure — no I/O. */
-export function boundThinking(existingText, newBlock, cap = THINKING_TOTAL_CAP) {
-  const had = String(existingText ?? '').startsWith(DROPPED_NOTE);
-  const blocks = [...thinkingBlocks(existingText ?? ''), newBlock];
-  let noteNeeded = had;
-  while (blocks.length > 1 && blocks.join('').length + (noteNeeded ? DROPPED_NOTE.length : 0) > cap) {
-    blocks.shift();
-    noteNeeded = true;
-  }
-  return (noteNeeded ? DROPPED_NOTE : '') + blocks.join('');
+export function parseHistory(text) {
+  const all = String(text ?? '').split('\n').filter(l => l.trim() && !l.startsWith('# '));
+  const s = all.find(l => l.startsWith(SUMMARY_TAG));
+  return { summary: s ? s.slice(SUMMARY_TAG.length) : '', lines: all.filter(l => l !== s) };
 }
 
-/** One turn's block for thinking.md: a heading naming the turn (timestamp + the
-    user's prompt, trimmed), then the model's reasoning, capped. Pure — no I/O —
-    so the cap and formatting are testable without a filesystem. */
-export function renderThinking(prompt, text, cap = THINK_CAP, now = () => new Date()) {
-  const body = String(text ?? '').trim();
-  if (!body) return '';
-  const clipped = body.length > cap
-    ? body.slice(0, cap) + `\n\n_(truncated at ${cap} characters)_` : body;
-  const p = String(prompt ?? '').trim().replace(/\s+/g, ' ').slice(0, 120) || '(no prompt)';
-  return `## ${now().toISOString()} — ${p}\n\n${clipped}\n`;
-}
+export const renderHistory = ({ summary, lines }) =>
+  ['# History', '', ...(summary ? [SUMMARY_TAG + summary, ''] : []), ...lines].join('\n') + '\n';
 
-/** Append one turn's thinking to thinking.md, then bound the WHOLE file to
-    `totalCap`, dropping the oldest blocks first (see boundThinking). Never
-    throws into the caller's turn on its own — server.mjs still wraps this the
-    way it wraps writeSummary. */
-export async function appendThinking(dir, prompt, text, cap = THINK_CAP,
-                                      totalCap = THINKING_TOTAL_CAP, now = () => new Date()) {
-  const block = renderThinking(prompt, text, cap, now);
-  if (!block) return;
-  await mkdir(dir, { recursive: true });
-  const existing = await readFile(join(dir, THINKING), 'utf8').catch(() => '');
-  await writeFile(join(dir, THINKING), boundThinking(existing, block + '\n', totalCap));
-}
-
-export const KEEP = 12;
-
-/** Newest `keep` messages stay; everything older is what gets folded into the summary. */
-export function splitHistory(history, keep = KEEP) {
-  const h = history ?? [];
-  if (h.length <= keep) return { fold: [], recent: h.slice() };
-  return { fold: h.slice(0, h.length - keep), recent: h.slice(h.length - keep) };
-}
-
-/** The one place that decides what a turn sends the model and what backs it up.
-    `messages` is the live window (last `keep`) — send this, not the full history.
-    `fold` is what just aged out of the window — the caller compresses/records this
-    into summary.md at the end of the turn, for NEXT turn's `summaryText`.
-    `inject` is what goes in the system prompt THIS turn: the summary already on
-    disk, describing only turns folded in *earlier* turns — never the live window,
-    which is exactly the contradiction that sent a local model into a loop (it was
-    told a turn was old and settled while also being handed it live). Empty until
-    something has actually folded. Pure — no I/O — so the invariant is testable
-    without a filesystem or a model call. */
-export function buildTurn(history, summaryText, keep = KEEP) {
-  const { fold, recent } = splitHistory(history, keep);
-  return { messages: recent, fold, inject: (summaryText ?? '').trim() };
-}
-
-/** Plain, no-model record of a conversation: every message, oldest first, no
-    compression. Cheap enough to write on every turn — this is what summary.md
-    gets when there's nothing worth spending a model call on yet, or no cheap
-    completion endpoint to spend it on (the Claude Code runtime). */
-export function renderRecord(history) {
-  return (history ?? []).map(m => `**${m.role}:** ${m.content}`).join('\n\n');
-}
-
-/** Same record, but bounded: the newest `keep` messages verbatim, older ones
-    collapsed to a one-line count. Used on a long conversation when there's no
-    cheap completion endpoint to compress it (Claude Code) — the alternative,
-    shelling out to `claude -p` for a compression pass, costs a whole extra
-    agent turn per twelve messages, so we trim instead of compress. */
-export function trimRecord(history, keep = KEEP) {
-  const h = history ?? [];
-  if (h.length <= keep) return renderRecord(h);
-  const dropped = h.length - keep;
-  return `_(${dropped} earlier message${dropped === 1 ? '' : 's'} omitted — this runtime ` +
-    `has no cheap compression step)_\n\n` + renderRecord(h.slice(h.length - keep));
-}
-
-/** What summary.md should get this turn:
-    - 'record'   — short history, any runtime: plain record, no model call.
-    - 'compress' — long history, a runtime with a cheap completion endpoint
-                   (OpenAI-compatible, chatCfg usable): the existing
-                   summaryPrompt/Chat.complete compaction.
-    - 'trim'     — long history, no cheap completion endpoint (Claude Code):
-                   bounded plain record instead. */
-export function summaryStrategy(historyLength, canCompress) {
-  if ((historyLength ?? 0) <= KEEP) return 'record';
-  return canCompress ? 'compress' : 'trim';
-}
-
-/* Carrying the previous summary back in is the whole point: each pass compresses
-   summary + the next batch into one summary, so memory of turn 1 survives turn 90
-   instead of falling off the end. */
-export function summaryPrompt(prevSummary, fold) {
-  const transcript = (fold ?? []).map(m => `${m.role}: ${m.content}`).join('\n\n');
+export function compactPrompt(summary, batch) {
   return [
     { role: 'system', content:
-      'You compress the memory of a computational-biology modelling session. Write ' +
-      'notes to your future self: what the model is, what was asked, what was computed ' +
-      'and what the numbers were. Keep every quantitative result and every decision ' +
-      'about the model. Drop pleasantries and restatements. Prose or bullets, under ' +
-      '400 words, no preamble — output the notes themselves.' },
+      'You compress the running history of a computational-biology modelling project. ' +
+      `Write about ${SUMMARY_WORDS} words. Keep what the model is, what was asked, every ` +
+      'number that was computed and every decision about the model — including everything ' +
+      'already in the summary so far, which must carry forward. Drop pleasantries. ' +
+      'No preamble — output the summary itself.' },
     { role: 'user', content:
-      (prevSummary?.trim()
-        ? 'Notes so far:\n\n' + prevSummary.trim() + '\n\n---\n\nNewer turns to fold in:\n\n'
-        : 'Turns to summarise:\n\n') + transcript },
+      (summary ? 'Summary so far: ' + summary + '\n\nNewer history to fold in:\n'
+               : 'History to summarise:\n') + batch.join('\n') },
   ];
+}
+
+/** Once summary + lines reach COMPACT_WORDS, fold them all into one ~SUMMARY_WORDS
+    summary. `compact(summary, lines)` is the AI call. If it fails, everything stays
+    as it is and the fold is retried next turn — history is never dropped to make room. */
+export async function foldHistory({ summary, lines }, compact) {
+  if (words(summary) + lines.reduce((n, l) => n + words(l), 0) < COMPACT_WORDS) return { summary, lines };
+  // ponytail: a model that is down for many turns lets the file grow past COMPACT_WORDS; fine until it isn't
+  const next = oneLine(await compact(summary, lines).catch(() => ''));
+  return next ? { summary: next, lines: [] } : { summary, lines };
+}
+
+export const readHistory = dir => readFile(join(dir, HISTORY), 'utf8').catch(() => '');
+
+export async function appendHistory(dir, newLines, compact) {
+  const h = parseHistory(await readHistory(dir));
+  const text = renderHistory(await foldHistory({ ...h, lines: [...h.lines, ...newLines] }, compact));
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, HISTORY), text);
+  return text;
 }
