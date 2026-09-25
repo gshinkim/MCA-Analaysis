@@ -242,3 +242,4 @@ plotted series as CSV. Past eight series identity moves to a second channel
   turn that uses them and never written to disk by the server.
 - The local runtime's tools are jailed to the project directory; `run_python` uses
   the project's own `.venv` and keeps each script in `workspace/runs/`.
+# MCA-Analaysis
