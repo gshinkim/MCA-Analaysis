@@ -1,16 +1,19 @@
 import { createServer } from 'node:http';
 import { readFile, writeFile, mkdir, stat, readdir, access } from 'node:fs/promises';
 import { constants as FS } from 'node:fs';
-import { existsSync } from 'node:fs';
-import { join, extname, normalize, dirname } from 'node:path';
+import { existsSync, watch } from 'node:fs';
+import { join, extname, normalize, dirname, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile, spawn } from 'node:child_process';
 import { Tellurium } from './tellurium.mjs';
 import { runAgent, toUiEvent } from './agent.mjs';
 import { runLocalAgent, Chat } from './local-agent.mjs';
+import { SKILL_NOTE } from '../web/js/prompt.mjs';
+import { route, jev, laya, active, questions, logLine, hintLine, autoBlock } from './router.mjs';
 import { homedir } from 'node:os';
 import { listSessions, saveSession, openSession, deleteSession,
-         sessionDir, readHistory, appendHistory, turnLines, compactPrompt } from './sessions.mjs';
+         sessionDir, readHistory, appendHistory, compressHistory, holdDir, turnLines,
+         compactPrompt } from './sessions.mjs';
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), '..'));
 const WEB = join(ROOT, 'web');
@@ -62,8 +65,20 @@ async function body(req, limit = 4e6) {
    Claude Code has no plain completion endpoint, so it gets a one-shot `claude -p`. */
 async function compactWith({ runtime, chatCfg, model }, summary, batch) {
   const [sys, user] = compactPrompt(summary, batch);
-  if (runtime === 'openai')
-    return (await new Chat(chatCfg).complete({ messages: [sys, user], maxTokens: 800 })).content;
+  // No maxTokens: the reply budget covers thinking too, and at 800 a thinking model
+  // spent it all thinking — measured: bonsai-27b failed every fold (and the cutoff
+  // retry) this way and history.md grew to 3,688 words. Uncapped it thought ~1,500
+  // words, then wrote the ~200-word summary.
+  // Thinking off where the server allows it: a summary needs none, and it is what made
+  // a fold take ~5 min on bonsai-27b (LM Studio honours reasoning_effort 'none':
+  // measured 0.6 s vs 29 s on a one-line summary). A server that rejects the field
+  // gets the plain request.
+  if (runtime === 'openai') {
+    const chat = new Chat(chatCfg);
+    const msg = await chat.complete({ messages: [sys, user], extra: { reasoning_effort: 'none' } })
+      .catch(() => chat.complete({ messages: [sys, user] }));
+    return msg.content;
+  }
   return new Promise((ok, fail) => {
     const p = spawn('claude', ['-p', user.content, '--append-system-prompt', sys.content,
                                '--setting-sources', 'project', ...(model ? ['--model', model] : [])],
@@ -97,11 +112,39 @@ async function resolveScratch(dir) {
   return p;
 }
 
-const modelVersion = async () => { try { return (await stat(MODEL_FILE)).mtimeMs; } catch { return 0; } };
+/* A project's model lives in its own folder: the editor, the agent and its Python
+   all read and write workspace/<project>/model.txt. workspace/model.txt is only the
+   default, for the page before any project exists. The browser names the project
+   on every call rather than the server remembering which one is open. */
+const modelFile = async project => {
+  if (!project) return MODEL_FILE;
+  let dir;
+  try { dir = await sessionDir(WORK, project); }
+  catch (e) { e.status ??= 400; throw e; }
+  if (!existsSync(join(dir, 'session.json')))
+    throw Object.assign(new Error('no such project: ' + project), { status: 400 });
+  return join(dir, 'model.txt');
+};
+// What the editor itself last wrote, per file: the turn's watcher must not echo the
+// user's own edits back (a stale echo would snap a dragged slider back). Only a
+// *recent* write counts — an old one must not suppress a later AI write that
+// happens to land on the same text.
+const editorWrote = new Map();
+const noteEditorWrite = (file, src) => {
+  const seen = editorWrote.get(file) ?? [];
+  seen.push({ src, t: Date.now() }); if (seen.length > 20) seen.shift();
+  editorWrote.set(file, seen);
+};
+const editorEcho = (file, src) =>
+  (editorWrote.get(file) ?? []).some(w => w.src === src && Date.now() - w.t < 5000);
+const modelVersion = async (file = MODEL_FILE) => { try { return (await stat(file)).mtimeMs; } catch { return 0; } };
 
 const which = cmd => new Promise(r =>
   execFile('sh', ['-lc', `command -v ${cmd}`], (e, out) => r(e ? null : out.trim())));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
+// LM Studio installs its CLI here and only adds it to PATH if you let it.
+const lmsBin = async () => (await which('lms')) ??
+  (existsSync(join(homedir(), '.lmstudio/bin/lms')) ? join(homedir(), '.lmstudio/bin/lms') : null);
 
 /* Ask an OpenAI-compatible server what it serves. Done here rather than in the
    page: the browser reaching localhost needs OLLAMA_ORIGINS or a CORS setting on
@@ -131,6 +174,32 @@ const KNOWN = [
   { kind: 'vLLM',      base: 'http://127.0.0.1:8000' },
 ];
 
+/* Two large local models do not fit in GPU memory together (LM Studio then fails
+   with "Compute error." mid-reply), so picking a model unloads every other one
+   loaded in Ollama or LM Studio. No keep = unload everything (a Claude model).
+   ponytail: only the default ports in KNOWN; a runtime moved elsewhere is left alone. */
+const hostOf = u => String(u || '').replace(/\/v\d+\/?$/, '').replace(/\/+$/, '').replace('//localhost', '//127.0.0.1');
+const LMSTUDIO = KNOWN.find(k => k.kind === 'LM Studio').base;
+async function ejectOthers(keepBase = '', keepModel = '') {
+  const keep = (base, ...names) => hostOf(keepBase) === base &&
+    names.some(n => n === keepModel || n === keepModel + ':latest');
+  const call = (url, body) => fetch(url, { method: body ? 'POST' : 'GET', signal: AbortSignal.timeout(3000),
+    headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) })
+    .then(r => r.json()).catch(() => ({}));
+  const gone = [];
+  for (const m of (await call(OLLAMA + '/api/ps')).models ?? [])
+    if (!keep(OLLAMA, m.name, m.model)) {
+      await call(OLLAMA + '/api/generate', { model: m.name, keep_alive: 0 }); gone.push('Ollama ' + m.name);
+    }
+  for (const m of (await call(LMSTUDIO + '/api/v1/models')).models ?? [])
+    for (const i of m.loaded_instances ?? [])
+      if (!keep(LMSTUDIO, m.key, i.id)) {
+        await call(LMSTUDIO + '/api/v1/models/unload', { instance_id: i.id }); gone.push('LM Studio ' + i.id);
+      }
+  if (gone.length) console.log('[eject]', gone.join(', '));
+  return gone;
+}
+
 /* ------------------------------- static ------------------------------- */
 // The browser agent loads its prompt, workflow and Skills over HTTP, so these
 // three folders are served read-only alongside web/.
@@ -142,7 +211,8 @@ async function serveStatic(req, res, urlPath) {
   const top = p.split('/')[1];
   const root = ASSET_DIRS.includes(top) ? ROOT : WEB;
   const file = normalize(join(root, p));
-  if (!file.startsWith(root)) return json(res, 403, { error: 'forbidden' });
+  const base = root === ROOT ? join(ROOT, top) : WEB;
+  if (!file.startsWith(base + sep)) return json(res, 403, { error: 'forbidden' });
   if (root === ROOT && !/\.(md|js|json)$/.test(file)) return json(res, 403, { error: 'forbidden' });
   try {
     const data = await readFile(file);
@@ -169,34 +239,55 @@ const routes = {
       claude: claude ? { path: claude } : { error: 'claude CLI not found on PATH' },
       agent: existsSync(join(ROOT, 'agents/model-scientist.md')) ? 'model-scientist' : null,
       workflow: existsSync(join(ROOT, 'workflows/mca-tellurium.js')) ? 'mca-tellurium' : null,
-      skills: skills.filter(s => !s.startsWith('.')),
+      skills: skills.filter(s => !s.includes('.')),   // folders only, not index.json
     });
   },
 
   'GET /api/model': async (req, res) => {
     await ensureWorkspace();
-    json(res, 200, { src: await readFile(MODEL_FILE, 'utf8'), version: await modelVersion() });
+    const file = await modelFile(new URL(req.url, 'http://x').searchParams.get('project'));
+    json(res, 200, { src: await readFile(file, 'utf8').catch(() => ''), version: await modelVersion(file) });
   },
 
   'PUT /api/model': async (req, res) => {
-    const { src } = await body(req);
+    // Hosted: no-op. There's one Tellurium worker shared by every visitor, so
+    // persisting a model here would leak one visitor's draft into another's page;
+    // the editor already holds the model client-side.
+    if (HOSTED) return json(res, 200, { version: 0 });
+    const { src, project } = await body(req);
     if (typeof src !== 'string') return json(res, 400, { error: 'src must be a string' });
     await ensureWorkspace();
-    await writeFile(MODEL_FILE, src);
-    json(res, 200, { version: await modelVersion() });
+    const file = await modelFile(project);
+    noteEditorWrite(file, src);
+    await writeFile(file, src);
+    json(res, 200, { version: await modelVersion(file) });
   },
 
   'PUT /api/settings': async (req, res) => {
+    if (HOSTED) return json(res, 200, { ok: true });
     const s = await body(req);
     await ensureWorkspace();
     await writeFile(SETTINGS_FILE, JSON.stringify(s, null, 2));
     json(res, 200, { ok: true });
   },
 
+  'GET /api/settings': async (req, res) => {
+    await ensureWorkspace();
+    let s;
+    try { s = JSON.parse(await readFile(SETTINGS_FILE, 'utf8')); }
+    catch { s = { start: 0, end: 100, points: 50 }; }
+    json(res, 200, s);
+  },
+
   'POST /api/simulate': async (req, res) => {
     const q = await body(req);
     if (!q.model?.trim()) return json(res, 400, { ok: false, error: 'model is empty' });
     json(res, 200, await te.call('simulate', q));
+  },
+  'POST /api/info': async (req, res) => {
+    const q = await body(req);
+    if (!q.model?.trim()) return json(res, 400, { ok: false, error: 'model is empty' });
+    json(res, 200, await te.call('info', q));
   },
   'POST /api/steady': async (req, res) => json(res, 200, await te.call('steadyState', await body(req))),
   'POST /api/settle': async (req, res) => json(res, 200, await te.call('settle', await body(req), 120000)),
@@ -205,6 +296,7 @@ const routes = {
   /* Directory listing for the local-model file picker. The browser cannot give a
      real path from <input type=file>, so the server browses instead. */
   'GET /api/fs': async (req, res) => {
+    if (HOSTED) return json(res, 400, { error: 'not available on a hosted deployment' });
     const u = new URL(req.url, 'http://x');
     const want = u.searchParams.get('path');
     const dir = want ? normalize(want) : homedir();
@@ -256,11 +348,11 @@ const routes = {
     let s;
     try { s = await openSession(WORK, id); }
     catch (e) { return json(res, 400, { error: String(e.message || e) }); }
-    // the snapshot becomes the live model the agent reads and the editor shows
-    if (s.model) await writeFile(MODEL_FILE, s.model);
+    // the project's own model.txt is what the editor shows and the agent edits;
+    // nothing is copied over the default workspace/model.txt any more
     if (s.settings && Object.keys(s.settings).length)
       await writeFile(SETTINGS_FILE, JSON.stringify(s.settings, null, 2));
-    json(res, 200, { ...s, version: await modelVersion() });
+    json(res, 200, { ...s, version: await modelVersion(await modelFile(s.id)) });
   },
 
   'POST /api/sessions/delete': async (req, res) => {
@@ -272,6 +364,7 @@ const routes = {
 
   /* Probe an OpenAI-compatible endpoint and list the models it serves. */
   'POST /api/probe': async (req, res) => {
+    if (HOSTED) return json(res, 400, { error: 'not available on a hosted deployment' });
     const { baseUrl, apiKey } = await body(req);
     if (!baseUrl) return json(res, 400, { ok: false, error: 'baseUrl is required' });
     const r = await probeOai(baseUrl, apiKey);
@@ -288,30 +381,63 @@ const routes = {
       const r = await probeOai(k.base, '', 1500);
       return r.ok ? { ...k, models: r.models } : null;
     }))).filter(Boolean);
-    json(res, 200, { hosted: false, servers, ollama: await which('ollama') });
+    json(res, 200, { hosted: false, servers, ollama: await which('ollama'), lmstudio: await lmsBin() });
   },
 
-  /* Start Ollama for the user instead of telling them to open a terminal. */
+  'POST /api/local/eject': async (req, res) => {
+    if (HOSTED) return json(res, 200, { ejected: [] });
+    const { baseUrl, model } = await body(req);
+    json(res, 200, { ejected: await ejectOthers(baseUrl, model) });
+  },
+
+  /* Start Ollama and LM Studio's server for the user instead of telling them to
+     open a terminal. LM Studio's app running is not enough: its models only reach
+     the picker once its server listens on 1234, and nothing here could start it. */
   'POST /api/local/start': async (req, res) => {
     if (HOSTED) return json(res, 400, { ok: false, error: 'not available on a hosted deployment' });
-    const up = await probeOai(OLLAMA, '', 1200);
-    if (up.ok) return json(res, 200, { ok: true, already: true, models: up.models });
-    const bin = await which('ollama');
-    if (!bin) return json(res, 200, { ok: false,
-      error: 'Ollama is not installed on this machine. Install it from https://ollama.com/download, then press Start again.' });
-    spawn(bin, ['serve'], { detached: true, stdio: 'ignore' }).unref();
-    for (let i = 0; i < 15; i++) {
-      await sleep(400);
-      const r = await probeOai(OLLAMA, '', 1000);
-      if (r.ok) return json(res, 200, { ok: true, models: r.models });
+    const [ol, lms] = await Promise.all([which('ollama'), lmsBin()]);
+    if (!ol && !lms) return json(res, 200, { ok: false,
+      error: 'Neither Ollama nor LM Studio is installed. Install one (https://ollama.com/download or https://lmstudio.ai), then press Start again.' });
+    const bring = async (bin, base, args) => {
+      if (!bin) return undefined;                 // not installed: nothing to start
+      const up = await probeOai(base, '', 1200);
+      if (up.ok) return up.models;
+      spawn(bin, args, { detached: true, stdio: 'ignore' }).unref();
+      for (let i = 0; i < 25; i++) {
+        await sleep(400);
+        const r = await probeOai(base, '', 1000);
+        if (r.ok) return r.models;
+      }
+      return null;
+    };
+    const got = await Promise.all([bring(ol, OLLAMA, ['serve']), bring(lms, LMSTUDIO, ['server', 'start'])]);
+    if (!got.some(Array.isArray))
+      return json(res, 200, { ok: false, error: 'started the local servers, but nothing came up on 11434 or 1234' });
+    json(res, 200, { ok: true, models: got.filter(Array.isArray).flat() });
+  },
+
+  /* The Settings "Test" button: one fixed routing call to the chosen provider, which
+     should say tellurium. For Layla it also warms the worker (the model load). */
+  'POST /api/router/test': async (req, res) => {
+    if (HOSTED) return json(res, 400, { ok: false, error: 'not available on a hosted deployment' });
+    const { key, provider } = await body(req);
+    if (provider !== 'laya' && !key) return json(res, 400, { ok: false, error: 'the key is empty' });
+    const t0 = Date.now();
+    const state = { request: 'simulate this model for 100 seconds', loaded: [], recent: [],
+                    model: 'has model', step: 0 };
+    try {
+      const p = provider === 'laya' ? await laya({ root: ROOT, state, questions: await questions(ROOT) })
+        : await jev({ key, questions: await questions(ROOT), signal: AbortSignal.timeout(10000), state });
+      json(res, 200, { ok: true, ms: Date.now() - t0, p });
+    } catch (e) {
+      json(res, 200, { ok: false, error: e?.name === 'TimeoutError' ? 'Jev timed out' : String(e?.message || e) });
     }
-    json(res, 200, { ok: false, error: 'started ollama, but nothing came up on port 11434' });
   },
 
   /* Server-sent events: one agent turn, streamed. */
   'POST /api/chat': async (req, res) => {
     const { message, sessionId, sessionDirId, model, env, runtime, chatCfg,
-            scratchDir, useWorkflow = true, resume = false } = await body(req);
+            scratchDir, useWorkflow = true, resume = false, router: routerCfg } = await body(req);
     if (!message?.trim()) return json(res, 400, { error: 'message is empty' });
     if (HOSTED) return json(res, 400, { error:
       'This deployment runs Tellurium only. Pick a local model in Settings — it runs on ' +
@@ -324,33 +450,81 @@ const routes = {
         '(Ollama: http://localhost:11434, LM Studio: http://localhost:1234), press ' +
         '"Test & list models", then Save.' });
     await ensureWorkspace();
+    // a model picked mid-session: free the GPU of the one it replaces before loading this one
+    if (runtime === 'openai') await ejectOthers(chatCfg.baseUrl, chatCfg.model).catch(() => {});
     let scratch = RUNS;
     try { scratch = await resolveScratch(scratchDir); }
     catch (e) { return json(res, 400, { error: 'Working folder: ' + e.message +
       ' — pick another in Settings, or clear it to use the default.' }); }
-    const before = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
 
     // The project's own folder is where its memory (history.md) and its scratch live.
     // history.md is the whole memory: it goes in the system prompt, and the model gets
     // no separate message history — one copy of each turn, never two.
     let sdir = null;
-    if (sessionDirId) sdir = await sessionDir(WORK, sessionDirId).catch(() => null);
+    if (sessionDirId) {
+      try { sdir = await sessionDir(WORK, sessionDirId); }
+      catch (e) { return json(res, 400, { error: 'Project: ' + e.message }); }
+    }
+    if (sdir && !existsSync(join(sdir, 'session.json'))) return json(res, 400, { error: 'no such project: ' + sessionDirId });
     const memory = sdir ? await readHistory(sdir) : '';
-    if (sdir) { await mkdir(sdir, { recursive: true }); scratch = sdir; }
+    // A working folder the user picked in Settings wins over the project's own
+    // folder; the project folder is only the fallback scratch.
+    if (sdir && !scratchDir) scratch = sdir;
+    // in a project the agent edits that project's model, not the default one
+    const mfile = sdir ? join(sdir, 'model.txt') : MODEL_FILE;
+    const modelPath = relative(ROOT, mfile);
+    const before = await readFile(mfile, 'utf8').catch(()=> '');
 
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8',
                          'cache-control': 'no-cache', connection: 'keep-alive',
                          'x-accel-buffering': 'no' });
     const send = o => { if (!res.writableEnded) res.write(`data: ${JSON.stringify(o)}\n\n`); };
     const ka = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
+    /* A local model turn runs for many minutes with nobody touching the Mac, and idle
+       sleep cut one mid-step — measured (pmset -g log): display off 19:03:41, idle
+       sleep 19:05:55; Chrome dropped the stream as "network error" and the run was
+       killed. Hold off idle sleep for the turn only (-w: never outlives the server;
+       the display may still sleep). */
+    const awake = process.platform === 'darwin' && !HOSTED
+      ? spawn('caffeinate', ['-i', '-w', String(process.pid)], { stdio: 'ignore' }).on('error', () => {})
+      : null;
+    const done = () => { clearInterval(ka); awake?.kill(); };
+
+    /* The AI's edits to the model reach the editor as they happen, not when the turn
+       ends: a local 27B turn runs for many minutes, and a turn that is stopped or cut
+       off by a restart never ends at all — so its edits never showed. The folder is
+       watched rather than the file, because a write that replaces the file (a rename
+       into place) ends a watch on the file itself. */
+    // Serialized: fs.watch fires without waiting for the previous push's read, and
+    // 'result' also needs a push before it can send — two unserialized callers would
+    // race and could deliver an older read last.
+    let shown = before;
+    let pq = Promise.resolve();
+    const pushModel = () => (pq = pq.then(async () => {
+      const now = await readFile(mfile, 'utf8').catch(() => null);
+      if (now == null || now === shown) return;
+      shown = now;
+      if (editorEcho(mfile, now)) return;   // the user's own recent edit
+      send({ type: 'model_changed', src: now, version: await modelVersion(mfile) });
+    }));
+    let watcher = null;
+    try { watcher = watch(dirname(mfile), (e, name) => { if (!name || name === 'model.txt') pushModel(); }); }
+    catch (e) { console.error('[watch]', e.message); }
+    const unwatch = () => { watcher?.close(); watcher = null; };
 
     // Accumulated across the whole turn, appended to history.md when it ends. A
     // whole-block re-send (Claude Code's final assistant message) repeats what the
     // deltas already streamed, so drop it rather than doubling the text.
     let thoughts = '', answer = '';
 
-    const onEvent = async raw => {
+    // Events also arrive out of order relative to each other (each onEvent call is
+    // its own async invocation), so they're queued too: 'result' must not reach the
+    // browser before the model_changed push it triggers below.
+    let eq = Promise.resolve();
+    const onEvent = raw => (eq = eq.then(() => handle(raw)).catch(e => console.error('[event]', e)));
+    const handle = async raw => {
         const ev = runtime === 'openai' ? raw : toUiEvent(raw);
+        if (ev?.type === 'result') await pushModel();
         if (ev) send(ev);
         if (ev?.type === 'thinking' && ev.text &&
             !(ev.whole && thoughts.includes(ev.text.trim().slice(0, 60))))
@@ -358,30 +532,59 @@ const routes = {
         if (ev?.type === 'delta' && ev.text) answer += ev.text;
         if (ev?.type === 'result' && ev.text) answer = ev.text;
         if (raw.type === 'done') {
-          // compare content, not mtime — the editor autosaves during a turn
-          const after = await readFile(MODEL_FILE, 'utf8').catch(()=> '');
-          if (after !== before) send({ type: 'model_changed', src: after, version: await modelVersion() });
+          // one last look, in case the final write landed after the watcher's last event
+          unwatch();
+          await pushModel();
 
-          // Persisting memory must never fail the turn.
+          /* Persisting memory must never fail the turn. Every turn that ends — answered,
+             cut off, failed or stopped — is written at once; the fold then runs in the
+             background, so neither the chat nor the next turn waits for the model. */
           if (sdir) try {
-            await appendHistory(sdir, turnLines(message, thoughts, answer),
-                                (sum, batch) => compactWith({ runtime, chatCfg, model }, sum, batch));
+            await appendHistory(sdir, turnLines(message, thoughts, answer));
           } catch (e) { console.error('[history]', e.message); }
+          await release();
+          if (sdir) compressHistory(sdir, (sum, batch) => compactWith({ runtime, chatCfg, model }, sum, batch))
+            .catch(e => console.error('[history fold]', e.message));
 
-          clearInterval(ka);
+          done();
           if (!res.writableEnded) res.end();
         }
       };
 
+    // The Skill router (backend/router.mjs), if switched on in Settings. The local
+    // agent routes at every step itself; the Claude CLI runs its own tool loop, so it
+    // is routed once, here, before the turn. The key is never logged.
+    const router = active(routerCfg)
+      ? s => route({ cfg: routerCfg, root: ROOT, request: message, hasModel: !!before.trim(), ...s })
+      : null;
+    let routed = '';
+    if (router && runtime !== 'openai') {
+      const r = await router({});
+      send({ type: 'log', text: logLine(r) });
+      routed = hintLine(r.hint) + await autoBlock(r.auto, ROOT);
+    }
+
+    // The awaits above (readHistory can wait behind a prior turn's compaction) can
+    // outlast the client; 'close' has then already fired, so never start the agent.
+    if (res.destroyed) { done(); unwatch(); return; }
+
+    // The project may be renamed while this turn runs: hold its folder so the old path
+    // keeps working (sessions.mjs holdDir) until the turn's history is written.
+    const release = sdir ? holdDir(sdir) : async () => {};
+
     // any throw from here on must still reach the browser as an SSE frame
     process.nextTick(() => {});
     const run = runtime === 'openai'
-      ? runLocalAgent({ root: ROOT, prompt: message, chatCfg,
-                        useWorkflow, liveModel: before, te, scratch, summary: memory, onEvent })
-      : runAgent({ root: ROOT, prompt: message, sessionId, model, env: env || {},
-                   useWorkflow, liveModel: before, scratch, summary: memory, resume, onEvent });
+      ? runLocalAgent({ root: ROOT, prompt: message + SKILL_NOTE, chatCfg, router,
+                        useWorkflow, liveModel: before, modelPath, te, scratch, summary: memory, onEvent })
+      : runAgent({ root: ROOT, prompt: message + SKILL_NOTE + routed, sessionId, model, env: env || {},
+                   useWorkflow, liveModel: before, modelPath, scratch, summary: memory, resume, onEvent });
     send({ type: 'session', sessionId: run.sessionId ?? sessionId ?? null, runtime: runtime || 'claude-code' });
-    req.on('close', () => { clearInterval(ka); run.kill(); });
+    // req 'close' fires once the body is read (long before the client disconnects);
+    // res 'close' is what actually tracks the SSE connection. writableFinished is
+    // true when we ended it ourselves (the 'done' branch above), so a normal finish
+    // doesn't also kill an already-finished run.
+    res.on('close', () => { done(); unwatch(); if (!res.writableFinished) run.kill(); });
   },
 };
 
@@ -395,7 +598,7 @@ const server = createServer(async (req, res) => {
     else json(res, 404, { error: 'no route for ' + key });
   } catch (e) {
     console.error(key, e);
-    if (!res.headersSent) json(res, 500, { error: String(e.message || e) });
+    if (!res.headersSent) json(res, e.status || 500, { error: String(e.message || e) });
     else res.end();
   }
 });

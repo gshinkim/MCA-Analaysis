@@ -5,8 +5,9 @@ description: >
   Tellurium. Use for Antimony model building, te.loada / loadSBMLModel,
   RoadRunner simulate and integrator settings, stochastic (gillespie)
   simulation, steadyState and steady-state solvers, selections and
-  amounts-vs-concentrations, reset / resetAll / resetToOrigin, metabolic control
-  analysis (getCC, getEE, elasticity and control-coefficient matrices),
+  amounts-vs-concentrations, reset / resetAll / resetToOrigin, computing metabolic
+  control analysis quantities (getCC, getEE, elasticity and control-coefficient
+  matrices; the MCA concepts, theorems and interpretation are in the mca Skill),
   stoichiometric and structural analysis (link matrix, conserved moieties),
   Jacobian and eigenvalues, parameter scans, plotting and r.draw, SBML / CellML /
   MATLAB conversion, and SED-ML / phraSED-ML / COMBINE inline-OMEX archives -
@@ -68,14 +69,19 @@ split.
   `r.draw()`, `tesbml`/`tesedml`/`tecombine`, `simplesbml`.
 - Building, converting, simulating, scanning, analysing or packaging an SBML /
   Antimony / CellML biochemical model.
-- Interpreting Tellurium or RoadRunner output: a simulation array, a steady-state
+- Reading Tellurium or RoadRunner output: a simulation array, a steady-state
   residual, a control-coefficient or elasticity matrix, a stoichiometry or link
   matrix, eigenvalues.
+- Computing MCA quantities (`getCC`, `getEE`, `getScaledFluxControlCoefficientMatrix`,
+  `getScaledElasticityMatrix`). This Skill covers the calls and the numerics only.
+  What a coefficient means, the summation and connectivity theorems, whether the
+  numbers make sense, and control-distribution or rate-limiting claims are **not**
+  here: load the `mca` Skill as well.
 - Debugging Tellurium code, an integrator exception, a non-converging steady
   state, a suspicious coefficient, or a Tellurium install problem.
 
 Do **not** activate for: MCA *theory* with no Tellurium/computational component
-(use the `mca` Skill); pure libSBML programming with no Tellurium involvement;
+(use the `mca` Skill alone); pure libSBML programming with no Tellurium involvement;
 general Python plotting questions.
 
 ## Default pipeline
@@ -130,7 +136,7 @@ the science.
 |---|---|
 | build a model and simulate it | `workflows/build_and_simulate.md` |
 | find / characterise a steady state, or its parameter dependence | `workflows/analyze_steady_state.md` |
-| compute and report control coefficients or elasticities | `workflows/run_control_analysis.md` |
+| compute and report control coefficients or elasticities | `workflows/run_control_analysis.md` for the computation; also load the `mca` Skill to validate and interpret |
 | scan one or two parameters, or assess sensitivity | `workflows/scan_parameters.md` |
 | export, package for exchange, or reproduce an experiment | `workflows/package_and_exchange.md` |
 | something failed, errored, or looks wrong | `workflows/diagnose_failure.md` |
@@ -151,6 +157,8 @@ stability guards), `examples/inline_omex_scan.md` (a scan as a COMBINE archive).
 | `reset()` (species only) | `resetAll()` (also parameters, to *current* initials) / `resetToOrigin()` (everything, to load time) `[L:rr/cls_RoadRunner]` | silently corrupts scans and ensembles |
 | `getAntimony()` / `getSBML()` = loaded model | `getCurrentAntimony()` / `getCurrentSBML()` = current state `[T:tellurium_methods]` | differ after any simulation or event |
 | the **last point of a time course** | a **steady state** `[L:rr/steady_state]` | one is a sample, the other has a residual |
+| `res[0]` = first **row** (one time point) | `res['time']` / `res[:, 0]` = time **column**; `res['[S1]']` = a species `[T:tellurium_methods]` | `simulate` returns one row per time point |
+| `getFullEigenValues()` as documented (two real columns) `[L:rr/cls_RoadRunner]` | what it returns: a 1-D complex array | use `ev.real` / `ev.imag`, not `ev[:, 0]` |
 | **spread of an output** under a parameter sweep | a **control coefficient** | different definitions entirely |
 
 ## Non-negotiable behavioural rules

@@ -4,11 +4,12 @@ import { join } from 'node:path';
 
 // One warm Python process. `import tellurium` costs seconds; the UI runs on every
 // keystroke, so the process is started once and fed newline-delimited JSON.
+// The Layla Skill router (backend/router.mjs) reuses it with its own python and script.
 export class Tellurium {
-  constructor(root) {
+  constructor(root, { python = join(root, '.venv/bin/python'), script = join(root, 'backend/py/te_worker.py'),
+                      name = 'Tellurium', missing = 'Tellurium is not installed. Run: bash setup.sh' } = {}) {
     this.root = root;
-    this.python = join(root, '.venv/bin/python');
-    this.script = join(root, 'backend/py/te_worker.py');
+    this.python = python; this.script = script; this.name = name; this.missing = missing;
     this.proc = null; this.buf = ''; this.seq = 0; this.pending = new Map();
     this.version = null;
   }
@@ -25,15 +26,20 @@ export class Tellurium {
       while ((i = this.buf.indexOf('\n')) >= 0) {
         const line = this.buf.slice(0, i); this.buf = this.buf.slice(i + 1);
         if (!line.trim()) continue;
-        let msg; try { msg = JSON.parse(line); } catch { continue; }
+        let msg;
+        try { msg = JSON.parse(line); }
+        catch { console.error('[' + this.name + '] unparseable reply:', line.slice(0, 200)); continue; }
         const w = this.pending.get(msg.id);
         if (w) { this.pending.delete(msg.id); w(msg); }
       }
     });
-    p.stderr.on('data', d => { const s = String(d).trim(); if (s && s !== 'READY') console.error('[te]', s); });
+    p.stderr.on('data', d => { const s = String(d).trim(); if (s && s !== 'READY') console.error('[' + this.name + ']', s); });
+    p.on('error', e => console.error('[' + this.name + '] spawn failed:', e.message));
+    p.stdin.on('error', () => {});
     p.on('exit', c => {
       this.proc = null;
-      for (const w of this.pending.values()) w({ ok: false, error: 'tellurium worker exited (' + c + ')' });
+      this.buf = '';
+      for (const w of this.pending.values()) w({ ok: false, error: this.name.toLowerCase() + ' worker exited (' + c + ')' });
       this.pending.clear();
     });
     this.proc = p;
@@ -41,7 +47,7 @@ export class Tellurium {
 
   call(op, payload = {}, timeoutMs = 60000) {
     if (!this.installed) {
-      return Promise.resolve({ ok: false, error: 'Tellurium is not installed. Run: bash setup.sh' });
+      return Promise.resolve({ ok: false, error: this.missing });
     }
     this.start();
     const id = ++this.seq;
@@ -49,11 +55,11 @@ export class Tellurium {
       const timer = setTimeout(() => {
         if (this.pending.delete(id)) {
           this.proc?.kill('SIGKILL');          // a runaway solver must not wedge the server
-          resolve({ ok: false, error: 'Tellurium call timed out after ' + (timeoutMs / 1000) + 's' });
+          resolve({ ok: false, error: this.name + ' call timed out after ' + (timeoutMs / 1000) + 's' });
         }
       }, timeoutMs);
       this.pending.set(id, m => { clearTimeout(timer); resolve(m); });
-      this.proc.stdin.write(JSON.stringify({ id, op, ...payload }) + '\n');
+      this.proc.stdin.write(JSON.stringify({ ...payload, id, op }) + '\n');
     });
   }
 

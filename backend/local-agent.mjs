@@ -1,10 +1,14 @@
 import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
-import { join, resolve, relative, dirname } from 'node:path';
+import { join, resolve, relative, dirname, sep } from 'node:path';
 import { execFile } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { Readable } from 'node:stream';
 import { forHistory, toolRunner, toolResult, readCompletion, fitMessages, resultCap,
          CONTEXT_DEFAULT, REPEAT_LIMIT, stripToolSyntax, missingArgs, replyTokens,
-         stepBudget } from '../web/js/oai.mjs';
+         stepBudget, SAMPLING, cutoffNudge, antimonyHint, callTool, userQuestion, closedNote } from '../web/js/oai.mjs';
 import { localSystem } from '../web/js/prompt.mjs';
+import { logLine, hintLine, recentLine, failed } from './router.mjs';
 
 /* A second agent runtime for models that are not Claude Code: anything speaking
    OpenAI-compatible /v1/chat/completions (Ollama, LM Studio, llama-server, a GGUF
@@ -24,7 +28,8 @@ export class Chat {
     this.apiKey = apiKey; this.model = model;
     // What the runtime loaded the model with, not what the weights allow: LM
     // Studio and Ollama both default well below the maximum.
-    this.ctx = Number(contextTokens) > 0 ? Number(contextTokens) : CONTEXT_DEFAULT;
+    this.ctxSet = Number(contextTokens) > 0;
+    this.ctx = this.ctxSet ? Number(contextTokens) : CONTEXT_DEFAULT;
     // Settings -> Budget. Left unset each falls back to the shares in oai.mjs.
     this.replyPct = replyPct; this.resultPct = resultPct; this.steps = steps;
   }
@@ -40,28 +45,89 @@ export class Chat {
      could not help, because 4096 was the binding term, not the window. Size the
      reply to the window the model was actually loaded with, and fit the prompt
      around that same number so both halves fit at once. */
-  async complete({ messages, tools, schema, signal, onStream, maxTokens }) {
+  /* LM Studio: see below. Otherwise, unless the user set a context size, ask Ollama
+     the window of the loaded model (/api/ps), else the model's own num_ctx (/api/show). The
+     24576 default was 8k short of the 32768 Ollama had loaded, and it is what three
+     Skills overflowed. Any other server, or no answer, keeps the default. */
+  /* Asked twice at most: before the first request, and once more after a request
+     has gone out, unless the first ask already found the loaded window. Ollama loads the model on
+     that first request, so /api/ps only knows its window afterwards — measured:
+     asked once, qwen3.8:27b ran all turn on the 24576 default while Ollama had it
+     at 32768, and the trimmer cut both Skills to 2000 chars mid-turn. */
+  async detectContext(signal) {
+    if (this.detected >= 2 || (this.detected === 1 && !this.sent)) return;
+    this.detected = (this.detected ?? 0) + 1;
+    const base = this.url.replace(/\/v\d+$/, '');
+    // Two lookups, so a server that never answers at all can take up to two 3 s
+    // timeouts; tie each to the caller's own abort signal too, so Stop still ends
+    // this rather than leaving it to run out the clock on its own.
+    const deadline = ms => signal ? AbortSignal.any([AbortSignal.timeout(ms), signal]) : AbortSignal.timeout(ms);
+    const ask = async (path, body, ms = 3000) => {
+      const r = await post(base + path, { 'content-type': 'application/json' },
+        body && JSON.stringify(body), deadline(ms), body ? 'POST' : 'GET');
+      return r.ok ? JSON.parse(await r.text()) : {};
+    };
+    /* LM Studio, model not loaded yet: the first chat request JIT-loads it at LM
+       Studio's own default, 8192 — measured: the turn died on its first Skill
+       load with HTTP 400 "request (10294 tokens) exceeds the available context
+       size (8192 tokens)", every time. Load it ourselves at a size a Skill turn
+       fits in. Already loaded: its real window wins over any setting. */
+    const lm = await ask('/api/v0/models/' + encodeURIComponent(this.model)).catch(() => ({}));
+    if (lm.max_context_length > 0) {
+      if (lm.state === 'loaded' && lm.loaded_context_length > 0) { this.ctx = lm.loaded_context_length; this.detected = 2; return; }
+      const want = Math.min(this.ctxSet ? this.ctx : LMSTUDIO_LOAD_CTX, lm.max_context_length);
+      const r = await ask('/api/v1/models/load', { model: this.model, context_length: want }, 300000)
+        .catch(() => ({}));
+      if (r.status === 'loaded') { this.ctx = want; this.detected = 2; return; }
+    }
+    if (this.ctxSet) { this.detected = 2; return; }
+    // Separate try per lookup: /api/show failing (a timeout, or a 200 that is not
+    // JSON) used to throw away a good /api/ps result too, and the turn silently
+    // fell back to the 24576 default. Skip /api/show once /api/ps already answered.
+    const live = await ask('/api/ps').then(j => j.models
+      ?.find(m => m.name === this.model || m.model === this.model)?.context_length).catch(() => 0);
+    const n = live > 0 ? live : await ask('/api/show', { model: this.model })
+      .then(j => Number(/(?:^|\n)\s*num_ctx\s+(\d+)/.exec(j.parameters ?? '')?.[1])).catch(() => 0);
+    if (n > 0) this.ctx = n;
+    if (live > 0) this.detected = 2;
+  }
+
+  async complete({ messages, tools, schema, signal, onStream, maxTokens, extra }) {
+    await this.detectContext(signal);
     const cap = Math.max(256, Math.min(maxTokens ?? Infinity, replyTokens(this.ctx, this.replyPct)));
-    const body = { model: this.model, messages: fitMessages(messages, this.ctx, cap),
-                   max_tokens: cap, temperature: 0.2, stream: true };
-    if (tools?.length) body.tools = tools;
+    /* Closing tools (the wrap-up) still sends the last ones offered, and says so in
+       words at the end instead of tool_choice 'none'. The chat template renders the
+       tool list first, so dropping it changed the prompt from its first token and
+       the prompt cache missed — measured on LM Studio: the wrap-up re-read 25,910
+       tokens from zero (~3 min at 140 tok/s) and looked hung; and tool_choice
+       'none' makes LM Studio drop the list itself (0 cached tokens vs 3072). A
+       call made anyway is caught (closedCall). A schema step gets no tools at all. */
+    if (tools?.length) this.open = tools;
+    const closed = !tools?.length && this.open && !schema;
+    const body = { model: this.model,
+                   messages: fitMessages(closed ? [...messages, closedNote] : messages, this.ctx, cap),
+                   max_tokens: cap, stream: true, ...SAMPLING, ...extra };
+    if (tools?.length || closed) body.tools = tools?.length ? tools : this.open;
     else body.tool_choice = 'none';        // a server that honours it cannot emit a call
     if (schema) body.response_format = {
       type: 'json_schema', json_schema: { name: 'result', strict: true, schema } };
 
     const msg = await this.send(body, { signal, onStream, tools });
-    if (msg.finish !== 'length' || msg.tool_calls?.length || msg.content) return msg;
+    // A closed-tools call is retried even when prose came with it: that prose is the
+    // run-up to the call ("Let me write the final model…:"), not an answer — measured
+    // on bonsai-27b, it was shown as one.
+    if (!msg.closedCall && (msg.finish !== 'length' || msg.tool_calls?.length || msg.content)) return msg;
 
     /* Cut off mid-thought with nothing visible. The thinking is the work, and it
        is already done, so put what got through back in front of the model and ask
-       for the conclusion alone — re-running the same request just thinks again. */
+       for its next move — re-running the same request just thinks again. "State
+       the final answer" alone was wrong early in a turn: nothing had been run yet,
+       so a model that obeyed the rules had nothing to say and said nothing. */
     onStream?.({ type: 'log', text: this.model +
-      ' ran out of tokens while thinking; asking it for the answer only.' });
-    const retry = { ...body, messages: fitMessages([...messages,
-      { role: 'assistant', content: msg.reasoning ?? '' },
-      { role: 'user', content: 'Your reasoning was cut off by the token limit. Do not think ' +
-        'any further and do not repeat the reasoning: state the final answer now, in full, ' +
-        'from what you worked out above.' }], this.ctx, cap) };
+      (msg.closedCall ? ' called a tool after tools were closed; asking it to answer.'
+                   : ' was cut off while thinking; asking it for its next move.') });
+    const retry = { ...body, messages: fitMessages([...messages, ...cutoffNudge(msg, tools?.length)],
+      this.ctx, cap) };
     const second = await this.send(retry, { signal, onStream, tools });
     // Never trade a partial answer for nothing: keep the first message unless the
     // retry actually said something.
@@ -69,14 +135,13 @@ export class Chat {
   }
 
   async send(body, { signal, onStream, tools }) {
+    this.sent = true;
     let res;
     try {
-      res = await fetch(this.url + '/chat/completions', {
-        method: 'POST', signal,
-        headers: { 'content-type': 'application/json',
-                   ...(this.apiKey ? { authorization: 'Bearer ' + this.apiKey } : {}) },
-        body: JSON.stringify(body),
-      });
+      res = await post(this.url + '/chat/completions', {
+        'content-type': 'application/json',
+        ...(this.apiKey ? { authorization: 'Bearer ' + this.apiKey } : {}) },
+        JSON.stringify(body), signal);
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       throw new Error(`cannot reach ${this.url} — ${e.message}. Is the server running, ` +
@@ -94,6 +159,33 @@ export class Chat {
       text: this.model + ' hit its token limit before finishing - the answer is cut off.' });
     return msg;
   }
+}
+
+// What Ollama loads by default here (its logs: n_ctx = 32768); CONTEXT_DEFAULT's
+// note measures a two-Skill turn at 11k tokens, so 8192 cannot hold one.
+const LMSTUDIO_LOAD_CTX = 32768;
+
+/* fetch() gives up on any response that has not started within 300 s (undici's
+   headersTimeout, not settable without the undici package). A local server that
+   runs one request at a time holds the next one unanswered until the current one
+   ends, so a queued step died at exactly 5m0s — measured twice in Ollama's log —
+   and llama-server kept generating the abandoned request, blocking its only slot
+   for whatever came next. node:http has no such deadline; the user's stop button
+   (signal) is the only thing that ends a request. */
+function post(url, headers, body, signal, method = 'POST') {
+  return new Promise((resolve, reject) => {
+    const req = (url.startsWith('https:') ? httpsRequest : httpRequest)(url,
+      { method, headers, signal, autoSelectFamily: true }, res => resolve({
+        ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode,
+        // Lazy: eagerly calling Readable.toWeb(res) attaches a 'data' consumer, so
+        // any await before text() reads it made text() come back empty — both
+        // current callers read text() right away, but a future one would not.
+        get body() { return Readable.toWeb(res); },
+        text: async () => { let s = ''; for await (const c of res) s += c; return s; },
+      }));
+    req.on('error', reject);
+    req.end(body);
+  });
 }
 
 /* --------------------------------- tools --------------------------------- */
@@ -118,12 +210,31 @@ const apiHint = stderr => /AttributeError|ImportError|ModuleNotFoundError|NameEr
     'another attribute name will fail the same way.'
   : '';
 
-function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'workspace/runs')) {
+/* Building or changing the model needs the pathway-modeling Skill (rate laws,
+   stoichiometry), loaded before tellurium; every other Skill is only recommended.
+   A refusal repeated counts toward the repeat guard. */
+export const modelGate = (run, loaded, isModelWrite) => {
+  if (!isModelWrite || loaded.has('pathway-modeling')) return null;
+  if (run.refused) run.repeats++; else run.refused = true;
+  return 'REFUSED — building or changing the model needs the pathway-modeling Skill. ' +
+         'Call load_skill("pathway-modeling") first, then load_skill("tellurium") for the ' +
+         'Antimony syntax, then call write_file again.';
+};
+
+function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'workspace/runs'),
+                   modelPath = DEFAULT_MODEL_PATH, loaded = new Set()) {
   // The project is readable because the Skills and the live model live there; the
-  // scratch folder is the user's own and is the only other place in play.
+  // scratch folder is the user's own and is the only other place in play. A bare
+  // startsWith(root) also passes a sibling directory whose name has root as a
+  // string prefix (root-evil/x), so every comparison requires the separator too.
+  const inside = (abs, dir) => abs === dir || abs.startsWith(dir + sep);
   const jail = p => {
-    const abs = resolve(root, p || '.');
-    if (!abs.startsWith(root) && !abs.startsWith(scratch))
+    let abs = resolve(root, p || '.');
+    // "/workspace/x" meant the project root — measured: bonsai-27b spent 7 of 14
+    // steps on "path escapes" for it. Still checked below like any other path.
+    if (!inside(abs, root) && !inside(abs, scratch) && String(p).startsWith('/'))
+      abs = resolve(root, '.' + p);
+    if (!inside(abs, root) && !inside(abs, scratch))
       throw new Error('path escapes the project and the working folder: ' + p);
     return abs;
   };
@@ -131,7 +242,12 @@ function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'work
 
   const impl = {
     async load_skill({ name }) {
+      // The schema offers an enum, but nothing stopped a model or a crafted
+      // tool-call from sending a raw path — '../../etc' walked straight out of
+      // skills/ since this never went through jail().
+      if (!/^[\w-]+$/.test(String(name))) throw new Error('unknown skill: ' + name);
       const md = await readFile(join(root, 'skills', name, 'SKILL.md'), 'utf8');
+      loaded.add(name);
       const files = await readdir(join(root, 'skills', name), { recursive: true })
         .catch(() => []);
       return md + '\n\n--- files in this skill (read with read_file) ---\n' +
@@ -143,13 +259,18 @@ function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'work
     },
     async write_file({ path, content }) {
       const abs = jail(path);
+      // Being inside the project was not a limit at all: write_file could overwrite
+      // backend/*.mjs, .claude/settings.json or a Skill. Only the live model and the
+      // user's own working folder are legitimate write targets.
+      if (!inside(abs, scratch) && abs !== join(root, modelPath))
+        throw new Error('write_file may only write the live model (' + modelPath + ') or into the working folder (' + scratch + '): ' + path);
       // The live model is the text in the user's editor. Antimony that does not load
       // would replace it with something broken they cannot get back, so it is checked
       // first — the same gate web/js/agent.mjs already applies to write_model.
-      if (te && abs === join(root, 'workspace/model.txt')) {
+      if (te && abs === join(root, modelPath)) {
         const r = await te.call('info', { model: String(content ?? '') });
         if (!r.ok) return 'REJECTED — that Antimony does not load: ' + r.error +
-          '\nThe live model is unchanged. Fix it and call write_file again.';
+          '\nThe live model is unchanged. Fix it and call write_file again.' + antimonyHint('read_file');
       }
       await mkdir(dirname(abs), { recursive: true });
       await writeFile(abs, content);
@@ -179,10 +300,10 @@ function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'work
   const schemas = [
     ['load_skill', 'Load a Skill and list its reference files. Use before making any domain claim.',
       { name: { type: 'string',
-                enum: ['mca', 'tellurium', 'mca-tellurium', 'pathway-modeling'] } }, ['name']],
-    ['read_file', 'Read a file in the project (e.g. a Skill reference, or workspace/model.txt).',
+                enum: ['mca', 'tellurium', 'pathway-modeling'] } }, ['name']],
+    ['read_file', 'Read a file in the project (e.g. a Skill reference, or ' + modelPath + ').',
       { path: { type: 'string' } }, ['path']],
-    ['write_file', 'Write a file in the project. Edit the live model at workspace/model.txt.',
+    ['write_file', 'Write the live model at ' + modelPath + ', or a file in the working folder ' + scratch + '.',
       { path: { type: 'string' }, content: { type: 'string' } }, ['path', 'content']],
     ['list_dir', 'List a directory in the project.', { path: { type: 'string' } }, ['path']],
     ['run_python', 'Run Python with Tellurium available. Print what you need; only stdout comes back.',
@@ -190,7 +311,8 @@ function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'work
   ];
 
   return {
-    impl,
+    impl, loaded,
+    isModel: p => resolve(root, p || '.') === join(root, modelPath),
     defs: schemas.map(([name, description, properties, required]) => ({
       type: 'function',
       function: { name, description, parameters: { type: 'object', properties, required } },
@@ -198,10 +320,42 @@ function makeTools(root, emit, te, cap = resultCap(), scratch = join(root, 'work
   };
 }
 
+/* The router puts a Skill in and says "do not load it again"; the model loaded it again
+   anyway — measured: bonsai-27b reloaded tellurium, ~4k tokens, right after the router.
+   Answered from this loop's own transcript, not the turn's `loaded` set: a workflow
+   stage starts from a fresh transcript and must still get the Skill. */
+const skillIn = (messages, name) =>
+  messages.some(m => String(m.content ?? '').includes('\nname: ' + name + '\n'));
+const reload = (messages, name, args) => name === 'load_skill' && skillIn(messages, args?.name)
+  ? 'The ' + args.name + ' Skill is already loaded above in this conversation; use that ' +
+    'text. Do not load it again. To go deeper, read_file one of its reference files.'
+  : null;
+
 /* ------------------------------- agent loop ------------------------------- */
+/* The Skill router (backend/router.mjs), when switched on: before step 0, then after
+   any round that loaded a Skill or failed. A hint rides on the end of the last
+   message, so the chat structure is unchanged; an auto-load goes through load_skill,
+   so modelGate sees a real load. The first failure switches it off for the turn. */
+async function steer(rt, tools, messages, recent, step, emit, cap) {
+  const r = await rt.fn({ loaded: [...tools.loaded], recent, step });
+  emit({ type: 'log', text: logLine(r) });
+  if (r.error) { rt.fn = null; return; }
+  let add = hintLine(r.hint);
+  for (const [name] of r.auto) {
+    // Shown like any load: without it the chat listed only the model's own loads, and a
+    // Skill the router put in (measured: mca) looked as if it had never loaded.
+    emit({ type: 'tools', tools: [{ name: 'load_skill', input: { name, by: 'router' } }] });
+    add += '\n\n[router] loaded the ' + name + ' Skill for you; do not load it again.\n\n' +
+      String(await callTool(tools.impl, 'load_skill', { name })).slice(0, cap);
+  }
+  if (add) messages.at(-1).content += add;
+}
+
 async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
-                          maxSteps = 12, stageMs = 900000, cap = resultCap() }) {
+                          maxSteps = 12, stageMs = 900000, cap = resultCap(), rt = {} }) {
   const messages = [{ role: 'system', content: system }, { role: 'user', content: prompt }];
+  const recent = [];
+  if (rt.fn) await steer(rt, tools, messages, recent, 0, emit, cap);
   const t0 = Date.now();
   const run = toolRunner(tools.impl, WRITES);
   const lacks = missingArgs(tools.defs);
@@ -229,14 +383,19 @@ async function toolLoop({ chat, system, prompt, tools, schema, emit, signal,
       if (!schema) return m.content ?? '';
       return await constrain({ chat, messages, schema, emit, signal });
     }
+    const had = tools.loaded.size;
+    let bad = false;
     for (const c of calls) {
       const name = c.function?.name;
       let args = {};
       try { args = JSON.parse(c.function?.arguments || '{}'); } catch {}
       emit({ type: 'tools', tools: [{ name, input: args }] });
-      const out = lacks(name, args) ?? await run(name, args);
+      const out = lacks(name, args) ?? reload(messages, name, args) ?? modelGate(run, tools.loaded, name === 'write_file' && tools.isModel(args.path)) ?? await run(name, args);
       messages.push(toolResult(c, name, String(out).slice(0, cap)));
+      recent.push(recentLine(name, args, out));
+      bad ||= failed(recent.at(-1));
     }
+    if (rt.fn && (bad || tools.loaded.size > had)) await steer(rt, tools, messages, recent, step + 1, emit, cap);
   }
   if (!schema) return '(the model kept calling tools without answering)';
   return await constrain({ chat, messages, schema, emit, signal });
@@ -283,16 +442,18 @@ function fill(obj, schema) {
 }
 
 /* --------------------------- the workflow, verbatim --------------------------- */
-export async function runWorkflowFile({ root, chat, args, emit, signal, te, scratch }) {
+export async function runWorkflowFile({ root, chat, args, emit, signal, te, scratch,
+                                        modelPath = DEFAULT_MODEL_PATH, loaded, rt }) {
   const src = await readFile(join(root, 'workflows/mca-tellurium.js'), 'utf8');
   const body = src.replace(/^\s*export\s+const\s+meta\s*=/m, 'const meta =');
   const cap = resultCap(chat.ctx, chat.resultPct);
-  const system = localSystem({ tools: TOOL_NAMES, liveModel: args?.model ?? '', howToRun: HOW_TO_RUN });
-  const tools = makeTools(root, emit, te, cap, scratch);
+  const system = localSystem({ tools: TOOL_NAMES, liveModel: args?.model ?? '', modelPath,
+                               howToRun: howToRun(root, modelPath, scratch) });
+  const tools = makeTools(root, emit, te, cap, scratch, modelPath, loaded);
 
   const agent = async (prompt, opts = {}) => {
     emit({ type: 'phase', phase: opts.phase, label: opts.label });
-    return toolLoop({ chat, system, prompt, tools, schema: opts.schema, emit, signal, cap,
+    return toolLoop({ chat, system, prompt, tools, schema: opts.schema, emit, signal, cap, rt,
                       maxSteps: Math.max(2, stepBudget(chat.steps) - 2) });
   };
   const phase = title => emit({ type: 'phase', phase: title });
@@ -304,12 +465,21 @@ export async function runWorkflowFile({ root, chat, args, emit, signal, te, scra
 
 const TOOL_NAMES = ['load_skill', 'read_file', 'write_file', 'list_dir', 'run_python'];
 
-const HOW_TO_RUN = `THE LIVE MODEL is \`workspace/model.txt\`. Write that file to change what the user sees.
+const DEFAULT_MODEL_PATH = 'workspace/model.txt';
+
+/* The file tools resolve paths from the install root, but run_python runs in the
+   working folder (the open project's own folder). With only relative paths to go
+   on, qwen3.8:27b guessed the wrong folder and opened a stale model.txt without
+   any error. The absolute path takes the guessing out. */
+const howToRun = (root, modelPath, scratch) => `THE LIVE MODEL is \`${modelPath}\`. Write that file to change what the user sees.
 
 \`run_python\` is your shell: it runs a Python script with tellurium, roadrunner, numpy
 and scipy importable, and returns only stdout — so print everything you need. Every
-script is kept, and runs from the user's working folder, so a relative path you write
-to lands there beside it. There is no separate terminal; run_python is it.`;
+script is kept. It runs from the working folder \`${scratch}\`, so a relative path you
+write to lands there. The file tools resolve paths from the project root instead, so
+in Python always load the live model by its absolute path:
+\`te.loada(open(${JSON.stringify(join(root, modelPath))}).read())\`
+There is no separate terminal; run_python is it.`;
 
 /* Handed to the workflow, which otherwise tells every stage to "run it with Bash". */
 const EXEC_NOTE =
@@ -322,9 +492,10 @@ const EXEC_NOTE =
    one copy of each past turn, never two. Seeing a turn both live and declared
    "settled, do not re-derive" is the defect that made a local model loop. */
 export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow = true,
-                               liveModel = '', te, onEvent, summary = '',
-                               scratch = join(root, 'workspace/runs') }) {
+                               liveModel = '', modelPath = DEFAULT_MODEL_PATH, te, onEvent, summary = '',
+                               scratch = join(root, 'workspace/runs'), router = null }) {
   const ctrl = new AbortController();
+  const rt = { fn: router };
   const emit = o => onEvent(o);
   if (!chatCfg?.baseUrl || !chatCfg?.model) {
     queueMicrotask(() => {
@@ -335,20 +506,33 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
     return { kill(){} };
   }
   const chat = new Chat(chatCfg);
-  const cap = resultCap(chat.ctx, chat.resultPct);
-  const tools = makeTools(root, emit, te, cap, scratch);
 
   (async () => {
     try {
+      // Detect before sizing the cap: this used to run before the first
+      // chat.complete() (the only other place detectContext() runs), so cap and
+      // the tools built from it stayed at the 24576 default all turn on a server
+      // whose real window was smaller or larger.
+      await chat.detectContext(ctrl.signal);
+      const cap = resultCap(chat.ctx, chat.resultPct);
+      const tools = makeTools(root, emit, te, cap, scratch, modelPath);
+
+      /* "Treat it as established; do not re-derive it" contradicted the rule that
+         every reported number comes from a tool call made this turn. Once the
+         history held a full answer to the question being asked again, qwen3.8:27b
+         obeyed the first rule: it called no tools and produced no answer. */
       const memory = !summary.trim() ? '' : [
         '', '## Project history', '',
         'Your own record of this project: a summary of everything older, then the',
-        'latest turns. Treat it as established; do not re-derive it.', '', summary.trim(), '',
+        'latest turns. Use it for what was asked, decided and changed. It is not a',
+        'tool result: a number from it may be stale, and the live model may have',
+        'changed since. Any number you report this turn comes from a tool call you',
+        'make this turn.', '', summary.trim(), '',
       ].join('\n');
 
       const system = localSystem({
         tools: useWorkflow ? [...TOOL_NAMES, 'run_mca_workflow'] : TOOL_NAMES,
-        liveModel, howToRun: HOW_TO_RUN,
+        liveModel, modelPath, howToRun: howToRun(root, modelPath, scratch),
         extra: (useWorkflow
           ? '\n## The workflow\n\nAnything needing numbers — control, elasticities, control ' +
             'coefficients, steady state in a control context — MUST go through `run_mca_workflow`. ' +
@@ -374,9 +558,9 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
           // always this turn's question, so use it rather than failing the stage.
           question = String(question ?? '').trim() || prompt;
           emit({ type: 'workflow_start' });
-          const model = await readFile(join(root, 'workspace/model.txt'), 'utf8').catch(() => '');
+          const model = await readFile(join(root, modelPath), 'utf8').catch(() => '');
           const out = await runWorkflowFile({
-            root, chat, emit, te, scratch, signal: ctrl.signal,
+            root, chat, emit, te, scratch, modelPath, loaded: tools.loaded, signal: ctrl.signal, rt,
             args: { question, model, needsNumbers, workdir: scratch, exec: EXEC_NOTE },
           });
           emit({ type: 'workflow_done' });
@@ -384,11 +568,12 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
         },
       }, defs: useWorkflow ? [...tools.defs, wfDef] : tools.defs };
 
-      const messages = [{ role: 'system', content: system }, ...history,
-                        { role: 'user', content: prompt }];
+      const messages = [{ role: 'system', content: system }, ...history, userQuestion(prompt)];
       const run = toolRunner(allTools.impl, WRITES);
       const lacks = missingArgs(allTools.defs);
       let final = '', usedTools = false, computed = false;
+      const recent = [];
+      if (rt.fn) await steer(rt, tools, messages, recent, 0, emit, cap);
       const STEPS = stepBudget(chat.steps);
       for (let step = 0; step < STEPS; step++) {
         if (ctrl.signal.aborted) break;
@@ -401,8 +586,12 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
           signal: ctrl.signal, onStream: emit }); // outer turn: thinking and tokens both
         messages.push(forHistory(m));
         const calls = m.tool_calls ?? [];
-        if (!calls.length) { final = stripToolSyntax(m.content); break; }
+        if (!calls.length) {
+          final = stripToolSyntax(m.content); break;
+        }
         usedTools = true;
+        const had = tools.loaded.size;
+        let bad = false;
         for (const c of calls) {
           const name = c.function?.name;
           let a = {};
@@ -410,9 +599,12 @@ export function runLocalAgent({ root, prompt, history = [], chatCfg, useWorkflow
           if (name !== 'run_mca_workflow') emit({ type: 'tools', tools: [{ name, input: a }] });
           else emit({ type: 'tools', tools: [{ name: 'Workflow', input: { workflow: 'mca-tellurium' } }] });
           if (COMPUTES.has(name)) computed = true;
-          const out = lacks(name, a) ?? await run(name, a);
+          const out = lacks(name, a) ?? reload(messages, name, a) ?? modelGate(run, tools.loaded, name === 'write_file' && tools.isModel(a.path)) ?? await run(name, a);
           messages.push(toolResult(c, name, String(out).slice(0, cap)));
+          recent.push(recentLine(name, a, out));
+          bad ||= failed(recent.at(-1));
         }
+        if (rt.fn && (bad || tools.loaded.size > had)) await steer(rt, tools, messages, recent, step + 1, emit, cap);
       }
       emit({ type: 'result', text: final || '(the model produced no final answer)',
              isError: !final, noTools: !usedTools, unverified: !computed && hasNumber(final) });

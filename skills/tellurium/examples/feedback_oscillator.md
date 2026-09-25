@@ -51,6 +51,10 @@ r.plot(res, title="Feedback Oscillations", ylabel="concentration",
        xlabel="time", alpha=0.9)
 ```
 
+`res` has one row per time point: `res['time']` or `res[:, 0]` is the time
+column, `res['[S1]']` a species; `res[0]` is the first *row*, not time
+`[T:tellurium_methods]`.
+
 If you need a fixed grid (for stacking arrays, or averaging), remember the
 guidance: a periodic function wants a step of roughly 1/12 of the period
 `[L:rr/simulation_and_integration]`. Estimate the period from the variable-step
@@ -100,7 +104,7 @@ stability question `[L:rr/stability]`:
 ```python
 Jac = r.getFullJacobian()
 print(Jac)
-ev = r.getFullEigenValues()            # col 0 real part, col 1 imaginary part
+ev = r.getFullEigenValues()            # 1-D complex array: ev.real, ev.imag
 print(ev)
 ```
 `[L:rr/cls_RoadRunner]`

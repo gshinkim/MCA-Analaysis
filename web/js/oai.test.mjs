@@ -47,9 +47,13 @@ assert.deepEqual(textToolCalls('The steady state is {"S1": 3.2} as computed.', N
 // a real answer is not a call
 assert.deepEqual(textToolCalls('Step 1 holds most of the control.', NAMES), []);
 
-// history carries no bookkeeping fields
-assert.deepEqual(forHistory({ role: 'assistant', content: 'x', reasoning: 'y', finish_reason: 'stop' }),
-                 { role: 'assistant', content: 'x' });
+// history carries no bookkeeping fields, but keeps the thinking: without it a
+// thinking model re-plans from zero after every tool call
+// ...under both names: Ollama reads `reasoning`, while LM Studio and the stock Qwen
+// chat template only render `reasoning_content` — sent as `reasoning` alone, Qwen
+// on LM Studio lost its own plan after every tool call
+assert.deepEqual(forHistory({ role: 'assistant', content: 'x', reasoning: 'y', finish: 'stop' }),
+                 { role: 'assistant', content: 'x', reasoning: 'y', reasoning_content: 'y' });
 
 // a real tool call round-trips as the tool role
 const real = { id: 'call_1', type: 'function', function: { name: 'read_file', arguments: '{}' } };
@@ -198,6 +202,7 @@ console.log('ok');
   assert.equal(replyTokens(8192, 1), replyTokens(8192, 10), 'reply share clamped low');
   assert.equal(stepBudget(9999), 40, 'steps clamped high');
   assert.equal(stepBudget(0), BUDGET.steps, 'zero means "unset", not "no steps"');
+  assert.equal(stepBudget('none'), Infinity, '"No limit": the loops run until the model answers');
   // a reply may never be so small the model cannot answer at all
   assert.ok(replyTokens(512, 10) >= 256, 'reply floor holds on a tiny window');
   console.log('budget ok');
@@ -308,3 +313,92 @@ import { REPEAT_LIMIT, stripToolSyntax } from './oai.mjs';
   assert.equal(stripToolSyntax('Flux is 1.2.'), 'Flux is 1.2.');
 }
 console.log('repeat escalation ok');
+
+
+
+// three Skills outgrowing the prompt budget are shortened, not dropped: dropping the
+// call took every result with it and left the model with only the question
+{
+  const { replyTokens, CONTEXT_DEFAULT } = await import('./oai.mjs');
+  const { readFileSync } = await import('node:fs');
+  const here = (await import('node:url')).fileURLToPath(new URL('.', import.meta.url));
+  const names = ['mca', 'pathway-modeling', 'tellurium'];
+  const msgs = [{ role: 'system', content: 's'.repeat(11000) }, { role: 'user', content: 'q' },
+    { role: 'assistant', content: '', reasoning: 'plan: load all three', tool_calls: names.map((n, i) =>
+      ({ id: 'c' + i, type: 'function', function: { name: 'load_skill', arguments: JSON.stringify({ name: n }) } })) },
+    ...names.map((n, i) => ({ role: 'tool', tool_call_id: 'c' + i,
+      content: readFileSync(here + '../../skills/' + n + '/SKILL.md', 'utf8') }))];
+  const reply = replyTokens(CONTEXT_DEFAULT);
+  assert.ok(estTokens(msgs) > CONTEXT_DEFAULT - reply, 'the case really is over budget');
+  const kept = fitMessages(msgs, CONTEXT_DEFAULT, reply);
+  assert.deepEqual(kept.map(m => m.role), ['system', 'user', 'assistant', 'tool', 'tool', 'tool']);
+  assert.ok(estTokens(kept) <= CONTEXT_DEFAULT - reply);
+  assert.equal(kept[2].reasoning, 'plan: load all three');   // the latest plan survives
+  assert.match(kept[3].content, /shortened to fit/);
+}
+// reasoning counts toward the estimate: it is sent back every step
+assert.ok(estTokens([{ role: 'assistant', content: '', reasoning: 'r'.repeat(3500) }]) >= 1000);
+console.log('staged trim ok');
+
+// A2-8: text-mode tool calling (toolResult) returns a tool's output as a role:'user'
+// "Result of ..." message, not role:'tool'. Stage 2 used to only shorten role:'tool',
+// so this survived whole into stage 3 and was dropped entirely instead of shortened —
+// the exact "reload Skills again and again" loop stage 2 exists to prevent.
+{
+  const big = 'y'.repeat(40000);
+  const msgs = [{ role: 'system', content: 's' }, { role: 'user', content: 'q' },
+    { role: 'assistant', content: '<tool_call>{"name":"read_file","arguments":{}}</tool_call>' },
+    { role: 'user', content: 'Result of read_file:\n\n' + big },
+    { role: 'user', content: 'follow up' }];
+  const fit = fitMessages(msgs, 8192);
+  const result = fit.find(m => m.role === 'user' && String(m.content).startsWith('Result of'));
+  assert.ok(result, 'the text-mode result survives, shortened rather than dropped');
+  assert.match(result.content, /shortened to fit/);
+  assert.ok(result.content.length < big.length, 'actually shortened, not left whole');
+}
+console.log('text-mode result shortening ok');
+
+/* With earlier chat history in front of it, the pinned "question" was the OLDEST
+   user message of the conversation, and the question actually being asked this
+   turn was trimmed away like any old message. The loop marks its question. */
+import { userQuestion } from './oai.mjs';
+{
+  const big = 'x'.repeat(40000);
+  const msgs = [
+    { role:'system', content:'sys' },
+    { role:'user', content:'an old question from history' },
+    { role:'assistant', content:'an old answer ' + 'y'.repeat(20000) },   // too big to keep
+    userQuestion('the question asked this turn'),
+    { role:'assistant', content:'', reasoning: 'r'.repeat(9000), reasoning_content: 'r'.repeat(9000),
+      tool_calls:[{id:'1',type:'function', function:{name:'load_skill',arguments:'{"name":"mca"}'}}] },
+    { role:'tool', tool_call_id:'1', content: big },
+    { role:'assistant', content:'', tool_calls:[{id:'2',type:'function',
+      function:{name:'load_skill',arguments:'{"name":"tellurium"}'}}] },
+    { role:'tool', tool_call_id:'2', content: big },
+  ];
+  const fit = fitMessages(msgs, 8192, 4096);
+  assert.ok(fit.some(m => m.content === 'the question asked this turn'), 'this turn\'s question survives');
+  assert.ok(!fit.some(m => m.content === 'an old question from history'), 'history goes first');
+  assert.ok(!fit.some(m => m.reasoning_content && m !== fit.findLast(x => x.role === 'assistant')),
+            'old thinking is dropped under both names');
+  // the marker is bookkeeping: it must never reach the server
+  assert.equal(JSON.stringify(userQuestion('q')), '{"role":"user","content":"q"}');
+}
+console.log('question pinning ok');
+
+/* Tools closed, and the model writes its call as text anyway. Nothing recognised it
+   (textToolCalls needs the offered names, and none were offered), stripToolSyntax
+   then erased it, and the turn ended "(the model produced no final answer)" with no
+   retry — measured on bonsai-27b's wrap-up step in LM Studio. */
+{
+  const call = '<tool_call>\n<function=read_file>\n<parameter=path>\nm.txt\n</parameter>\n</function>\n</tool_call>';
+  const m = await readCompletion(streamOf('data: ' + JSON.stringify({ choices: [{ delta: { content: call } }] }) + '\n'),
+                                 { toolNames: [] });
+  assert.equal(m.closedCall, true, 'a text call after tools closed is flagged');
+  assert.equal(m.content, '', 'and not left as the answer');
+  // a JSON answer (constrain's schema step) is not a tool call
+  const j = await readCompletion(streamOf('data: ' + JSON.stringify({ choices: [{ delta: { content: '```json\n{"a":1}\n```' } }] }) + '\n'),
+                                 { toolNames: [] });
+  assert.ok(!j.closedCall); assert.match(j.content, /"a":1/);
+}
+console.log('closed text call ok');

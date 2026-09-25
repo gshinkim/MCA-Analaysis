@@ -207,7 +207,7 @@ console.log('sessions empty-model guard ok');
 console.log('sessions rename retry ok');
 
 {
-  const { mkdtemp, readFile: rf } = await import('node:fs/promises');
+  const { mkdtemp, writeFile: wf2, readFile: rf } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { turnLines, parseHistory, renderHistory, foldHistory, appendHistory, saveSession,
           words, COMPACT_WORDS, HISTORY } = await import('./sessions.mjs');
@@ -225,7 +225,10 @@ console.log('sessions rename retry ok');
   assert.deepEqual(parseHistory(''), { summary: '', lines: [] });
 
   let calls = [];
-  const compact = async (sum, batch) => { calls.push({ sum, batch }); return `F${calls.length}(${sum || '-'})`; };
+  // a fake summary long enough to pass the fold's sanity floor; its first word carries
+  // the call tree the assertions check
+  const PAD = ' w'.repeat(60), tag = s => String(s).split(' ')[0];
+  const compact = async (sum, batch) => { calls.push({ sum, batch }); return `F${calls.length}(${tag(sum || '-')})` + PAD; };
   const lineOf = n => '- **user:** ' + 'w '.repeat(n).trim();   // n + 2 words ("-", "**user:**")
 
   // under 1000 words: nothing to fold, no AI call
@@ -236,33 +239,143 @@ console.log('sessions rename retry ok');
   // 1000 words -> one summary, lines cleared; the prior summary is carried in, which is the loop
   const once = await foldHistory({ summary: '', lines: [lineOf(500), lineOf(500)] }, compact);
   assert.equal(calls.length, 1);
-  assert.deepEqual(once, { summary: 'F1(-)', lines: [] });
+  assert.equal(tag(once.summary), 'F1(-)'); assert.deepEqual(once.lines, []);
   const twice = await foldHistory({ summary: once.summary, lines: [lineOf(COMPACT_WORDS)] }, compact);
-  assert.equal(calls[1].sum, 'F1(-)', 'the previous summary goes back in');
-  assert.deepEqual(twice, { summary: 'F2(F1(-))', lines: [] });
+  assert.equal(tag(calls[1].sum), 'F1(-)', 'the previous summary goes back in');
+  assert.equal(tag(twice.summary), 'F2(F1(-))'); assert.deepEqual(twice.lines, []);
   assert.ok(words('a  b\nc') === 3);
 
   // the AI failing never loses history: everything stays and the fold retries next turn
   const big = { summary: 'S', lines: [lineOf(1200)] };
   assert.deepEqual(await foldHistory(big, async () => { throw new Error('down'); }), big);
 
-  // end to end on disk
+  /* ...nor does a "summary" that is really a reply. Measured on bonsai-27b: handed
+     5,626 words ending in "- **user:** hi", it answered the hi ("Hi! Understood. …",
+     42 words) and that replaced the whole history. A fold only runs at 1000+ words,
+     so a real ~200-word summary is never this short. */
+  assert.deepEqual(await foldHistory(big, async () => 'Hi! Understood. What would you like me to work on next?'), big);
+
+  // the history is fenced, and the instruction comes AFTER it, where a weak model looks
+  {
+    const { compactPrompt } = await import('./sessions.mjs');
+    const u = compactPrompt('', ['- **user:** hi']).at(-1).content;
+    assert.match(u, /<history>[\s\S]*- \*\*user:\*\* hi[\s\S]*<\/history>/);
+    assert.ok(u.indexOf('</history>') < u.search(/do not (reply|answer)/i), 'instruction after the history');
+  }
+
+  /* end to end on disk (a real project: appendHistory requires session.json).
+     The append is immediate and never waits on the model; the fold runs after it,
+     separately. Measured: with the fold inside the append, a 4-minute compression
+     held the turn's lines unwritten, the project was renamed meanwhile, the write
+     went to a folder that no longer existed, and the whole turn was lost. */
+  const { compressHistory } = await import('./sessions.mjs');
   const dir = await mkdtemp(join(tmpdir(), 'mca-'));
+  await wf2(join(dir, 'session.json'), JSON.stringify({ name: 'p', chats: [] }));
   calls = [];
-  await appendHistory(dir, turnLines('q', 'w '.repeat(300), 'w '.repeat(300)), compact);
-  assert.equal(calls.length, 0);
-  await appendHistory(dir, turnLines('q', 'w '.repeat(300), 'w '.repeat(300)), compact);
+  await appendHistory(dir, turnLines('q', 'w '.repeat(300), 'w '.repeat(300)));
+  await compressHistory(dir, compact);
+  assert.equal(calls.length, 0, 'under 1000 words: no fold');
+  await appendHistory(dir, turnLines('q', 'w '.repeat(300), 'w '.repeat(300)));
+  assert.equal(parseHistory(await rf(join(dir, HISTORY), 'utf8')).lines.length, 6, 'appended before any fold');
+  await compressHistory(dir, compact);
   assert.equal(calls.length, 1, '1200 words folds');
-  assert.deepEqual(parseHistory(await rf(join(dir, HISTORY), 'utf8')), { summary: 'F1(-)', lines: [] });
+  const folded = parseHistory(await rf(join(dir, HISTORY), 'utf8'));
+  assert.equal(tag(folded.summary), 'F1(-)'); assert.deepEqual(folded.lines, []);
+  // what a fold replaced is kept, so a bad fold can always be undone
+  assert.equal(parseHistory(await rf(join(dir, 'history.prev.md'), 'utf8')).lines.length, 6,
+    'the pre-fold history (2 turns x 3 lines) is backed up');
+
+  // a turn that ends WHILE the fold is compressing keeps its lines, after the summary
+  {
+    const d2 = await mkdtemp(join(tmpdir(), 'mca-'));
+    await wf2(join(d2, 'session.json'), JSON.stringify({ name: 'p', chats: [] }));
+    await appendHistory(d2, [lineOf(1200)]);
+    let release; const gate = new Promise(r => (release = r));
+    const slow = async (sum, batch) => { await gate; return 'S' + PAD; };
+    const folding = compressHistory(d2, slow);
+    await appendHistory(d2, ['- **user:** during the fold']);   // must not wait for the model
+    release(); await folding;
+    const after = parseHistory(await rf(join(d2, HISTORY), 'utf8'));
+    assert.equal(tag(after.summary), 'S');
+    assert.deepEqual(after.lines, ['- **user:** during the fold']);
+  }
+
+  // the folder renamed (gone) while compressing: nothing is written, and the lines
+  // already on disk moved with the folder, so nothing is lost
+  {
+    const { rename } = await import('node:fs/promises');
+    const d3 = await mkdtemp(join(tmpdir(), 'mca-'));
+    await wf2(join(d3, 'session.json'), JSON.stringify({ name: 'p', chats: [] }));
+    await appendHistory(d3, [lineOf(1200)]);
+    const moved = d3 + '-renamed';
+    await compressHistory(d3, async () => { await rename(d3, moved); return 'S' + PAD; });
+    assert.equal(parseHistory(await rf(join(moved, HISTORY), 'utf8')).lines.length, 1, 'the turn survived the rename');
+  }
+
+  // DEFECT: a turn outliving its project must not resurrect a deleted/renamed folder
+  const gone = await mkdtemp(join(tmpdir(), 'mca-'));   // no session.json — project deleted mid-turn
+  await appendHistory(gone, turnLines('q', '', 'a'));
+  assert.equal(await rf(join(gone, HISTORY), 'utf8').catch(() => null), null,
+    'appendHistory on a dir without session.json must not create history.md');
+
+  // DEFECT: overlapping appends on the same project must not race the read-modify-write
+  // and drop a line (see A3-6) — both concurrent calls' lines must survive.
+  const conc = await mkdtemp(join(tmpdir(), 'mca-'));
+  await wf2(join(conc, 'session.json'), JSON.stringify({ name: 'c', chats: [] }));
+  await wf2(join(conc, HISTORY), renderHistory({ summary: '', lines: [] }));
+  await Promise.all([
+    appendHistory(conc, ['- **user:** first']),
+    appendHistory(conc, ['- **user:** second']),
+  ]);
+  const concText = await rf(join(conc, HISTORY), 'utf8');
+  assert.match(concText, /first/, 'first concurrent append must survive');
+  assert.match(concText, /second/, 'second concurrent append must survive');
 
   // a project has history.md from its first save, before any AI turn — and a later
   // save never blanks one that already has content
   const work = await mkdtemp(join(tmpdir(), 'mca-'));
   const { id } = await saveSession(work, { id: 'p', fresh: true, name: 'p', model: 'm' });
   assert.deepEqual(parseHistory(await rf(join(work, id, HISTORY), 'utf8')), { summary: '', lines: [] });
-  await appendHistory(join(work, id), ['- **user:** keep me'], compact);
+  await appendHistory(join(work, id), ['- **user:** keep me']);
   await saveSession(work, { id, name: 'p', model: 'm' });
   assert.match(await rf(join(work, id, HISTORY), 'utf8'), /keep me/);
 }
 
 console.log('sessions history fold ok');
+
+/* Renaming a project while a turn runs in it, the way the app does (saveSession):
+   the turn's own writes to the old path, its history append, and a compression that
+   finishes after the rename all land in the renamed folder; the temporary link goes
+   when the turn ends and never shows as a second project. */
+{
+  const { mkdtemp, writeFile: wf, readFile: rf, lstat: ls } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { saveSession, listSessions, holdDir, appendHistory, compressHistory, parseHistory, HISTORY,
+          sessionDir } = await import('./sessions.mjs');
+  const work = await mkdtemp(join(tmpdir(), 'mca-rename-'));
+  const { id } = await saveSession(work, { name: 'Untitled project', fresh: true, chats: [] });
+  const old = await sessionDir(work, id);             // as server.mjs gets it (resolved)
+  await appendHistory(old, ['- **user:** ' + 'w '.repeat(1200).trim()]);
+  const release = holdDir(old);                                   // a turn starts
+
+  let renamed;
+  const PAD = ' w'.repeat(60);
+  const fold = compressHistory(old, async () => {                 // rename lands mid-compression
+    renamed = (await saveSession(work, { id, name: 'Layatest', chats: [] })).id;
+    return 'S' + PAD;
+  });
+  await fold;
+  const now = await sessionDir(work, renamed);
+  assert.equal(renamed, 'Layatest');
+  assert.ok((await ls(old)).isSymbolicLink(), 'old path links to the renamed folder while the turn runs');
+  await wf(join(old, 'run-1.py'), 'print(1)');                    // the agent writes via its old path
+  assert.equal(await rf(join(now, 'run-1.py'), 'utf8'), 'print(1)');
+  await appendHistory(old, ['- **user:** after the rename']);    // the turn ends
+  const h = parseHistory(await rf(join(now, HISTORY), 'utf8'));
+  assert.equal(h.summary.split(' ')[0], 'S', 'the mid-rename fold reached the renamed folder');
+  assert.deepEqual(h.lines, ['- **user:** after the rename']);
+  assert.deepEqual((await listSessions(work)).map(x => x.id), ['Layatest'], 'the link is not a second project');
+  await release();
+  assert.equal(await ls(old).catch(() => null), null, 'the link goes when the turn ends');
+  console.log('sessions rename mid-turn ok');
+}

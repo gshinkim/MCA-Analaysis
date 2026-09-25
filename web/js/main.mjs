@@ -1,12 +1,12 @@
-import { $, $$, store, fmt, flash, coalesce } from './util.mjs';
+import { $, $$, store, fmt, flash, latestOnly, esc } from './util.mjs';
 import { S } from './state.mjs';
 import * as api from './api.mjs';
-import { draw, initChartInteractions } from './chart.mjs';
+import { draw, initChartInteractions, showTable } from './chart.mjs';
 import { renderControls, initAccordions, setOnChange } from './panel.mjs';
 import { initSettings, fillModels, closeSettings, refreshEnv, refreshLocal } from './settings.mjs';
 import { initChat, toggleChat, setOnModelChanged, setOnSessionDeleted, offerScratchSetup, dumpChats, loadChats, noteNoModel } from './chat.mjs';
 import { initExport, initImport } from './export.mjs';
-import { initSession, saveSoon } from './session.mjs';
+import { initSession, saveSoon, currentId, saveIdle } from './session.mjs';
 
 const editor = $('#model');
 
@@ -42,7 +42,7 @@ async function run(){
 
   if(!r.ok){
     status('err', steadyMode ? 'No steady state' : 'Tellurium error');
-    $('#parseMsg').innerHTML = '<span class="err">⚠ '+String(r.error).split('\n')[0]+'</span>';
+    $('#parseMsg').innerHTML = '<span class="err">⚠ '+esc(String(r.error).split('\n')[0])+'</span>';
     $('#zoomParse').innerHTML = '<span class="err">error</span>';
     S.result = null; draw();
     return;
@@ -62,7 +62,7 @@ async function run(){
   bits.push(i.names.length+(i.names.length===1?' series':' series')+' plotted');
   const summary = bits.join(' · ');
   $('#parseMsg').innerHTML = '<span class="chip">'+summary+'</span>'+
-    (i.note ? ' <span class="warn">⚠ '+i.note+'</span>' : '');
+    (i.note ? ' <span class="warn">⚠ '+esc(i.note)+'</span>' : '');
   $('#zoomParse').textContent = i.reactions.length+' reactions';
   const eng = i.engine ? 'tellurium '+i.engine.tellurium : 'tellurium';
   const eig = i.stability?.eigenvalues?.length
@@ -83,34 +83,31 @@ async function run(){
                          : i.unstable ? 'Unstable — no steady state · ' : 'No settling · ')
             : 'Ready · ')+S.lastRunMs.toFixed(0)+' ms');
   if(steadyMode && i.note)
-    $('#parseMsg').innerHTML = '<span class="chip">'+summary+'</span> <span class="err">'+i.note+'</span>';
+    $('#parseMsg').innerHTML = '<span class="chip">'+summary+'</span> <span class="err">'+esc(i.note)+'</span>';
   captureDefault();
   draw();
 }
 
-/* Coalesce a drag's worth of input, and back off once runs get slow (Doherty).
-   A pure trailing debounce starves: every oninput cleared the timer, so a slider
-   held down never committed until the user let go — which is exactly why the plot
-   looked like it only updated on release. `oldest` caps that wait, so a continuous
-   drag still re-simulates at a steady rate. */
 let commitT;
 async function commit(){
   clearTimeout(commitT);
-  await api.putModel(editor.value);
-  api.putSettings(cfg());
-  run();
+  editing = false;
+  // A rename or first save still in flight must land before the model PUT below,
+  // or the PUT can hit the old folder id (rename) or the shared default file
+  // (first save not yet claimed its id).
+  await saveIdle();
+  // simulate at once; the save to disk runs alongside instead of in front of it
+  const [put] = await Promise.all([api.putModel(editor.value, currentId()), run(), api.putSettings(cfg())]);
+  if(put?.error) status('err', 'Model not saved: ' + put.error);
   // Direct edits (editor input, tStart/tEnd/nPts) all funnel through here, same as
   // a chat turn or a rename — without this, editing a session's model without ever
   // sending a chat message never reaches its runs/ snapshot (worthSaving still
   // guards against creating a folder for a session with no completed turns).
   saveSoon();
 }
-const commitSoon = coalesce(commit, () => {
-  const wait = S.lastRunMs > 150 ? 200 : 30;
-  // never hold a frame back for longer than the run itself costs
-  return { wait, max: Math.max(wait, Math.min(S.lastRunMs * 1.5, 300)) };
-});
-setOnChange(commitSoon);
+
+// sliders re-simulate on every movement, not on release (see latestOnly)
+setOnChange(latestOnly(commit));
 
 /* ---------------- project name ----------------
    Click the breadcrumb and type. Read back as textContent everywhere, so a paste
@@ -151,7 +148,11 @@ $('#resetAll').onclick = ()=>{
 
 /* ---------------- editor ---------------- */
 let deb;
+// True from a keystroke until commit() picks it up: an AI edit arriving in that
+// window must not replace what the user is typing (see setOnModelChanged).
+let editing = false;
 editor.addEventListener('input', ()=>{
+  editing = true;
   status('busy','Editing…');
   clearTimeout(deb); deb=setTimeout(commit, 300);
 });
@@ -223,6 +224,7 @@ addEventListener('keydown',e=>{
   if((e.metaKey||e.ctrlKey)&&e.key==='Enter'){ e.preventDefault(); $('#rerunBtn').click(); }
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='b'){ e.preventDefault(); togglePanel(); }
   if(e.key==='Escape'){
+    if(!$('#tablePage').hidden) return showTable(false);
     if($('#editorWrap').classList.contains('zoom')) return zoomEditor(false);
     if($('#plotCard').classList.contains('zoom')) return zoomPlot(false);
     closeSettings();
@@ -231,7 +233,15 @@ addEventListener('keydown',e=>{
 });
 
 /* ---------------- boot ---------------- */
-setOnModelChanged(src=>{ editor.value = src; run(); });
+// the AI's edits arrive while its turn is still running; one that matches what the
+// editor already shows changes nothing, so it must not reset the cursor either.
+// A user who is mid-keystroke wins outright — the AI's edit is dropped, not queued,
+// since applying it after the fact would still clobber whatever they typed next.
+setOnModelChanged(src=>{
+  if(src === editor.value) return;
+  if(editing) return status('err', 'AI edited the model while you were typing — kept your text');
+  editor.value = src; run();
+});
 // a deleted session's name must not survive to regenerate the folder it named
 setOnSessionDeleted(()=> setProjName(PROJ_DEF));
 
@@ -276,6 +286,12 @@ setOnSessionDeleted(()=> setProjName(PROJ_DEF));
   $$('#tStart, #tEnd').forEach(el=>{ el.disabled = steadyMode; });
   const m = await api.getModel();
   editor.value = m.src;
+
+  // workspace/settings.json is the last-committed simulation window; without this
+  // a reload with no session open falls back to the HTML defaults while the file
+  // (and whatever the AI reads) still has the real one.
+  const st = await api.getSettings().catch(() => null);
+  if(st?.points){ $('#tStart').value = st.start ?? 0; $('#tEnd').value = st.end ?? 100; $('#nPts').value = st.points; }
 
   refreshLocal();          // whatever is already running here lands in the picker
 

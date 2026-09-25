@@ -8,3 +8,5 @@ workspace/runs/*
 node_modules/
 .DS_Store
 workspace/model_candidate.txt
+__pycache__/
+*.pyc

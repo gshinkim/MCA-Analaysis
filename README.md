@@ -242,4 +242,23 @@ plotted series as CSV. Past eight series identity moves to a second channel
   turn that uses them and never written to disk by the server.
 - The local runtime's tools are jailed to the project directory; `run_python` uses
   the project's own `.venv` and keeps each script in `workspace/runs/`.
-# MCA-Analaysis
+
+## Layla: the local skill router
+
+`Layla (altlernative to jev)/` is a fine-tuned [Laya](https://github.com/receptron/laya)
+(ModernBERT-large) that decides which Skills (`mca`, `tellurium`, `pathway-modeling`)
+a request needs, fully offline. It replaces Jev as the router; pick one under
+Settings → Runtime. `backend/router.mjs` runs `serve.py` as a warm Python worker.
+
+Held-out test set (173 cases), exact-set accuracy: **Layla 0.971**, TF-IDF 0.890,
+keywords 0.792, Jev 0.283, untrained Laya 0.249.
+
+Weights are not in git (~800 MB each). To rebuild:
+
+```bash
+cd "Layla (altlernative to jev)"
+git clone https://github.com/receptron/laya     # the laya package
+# put the pretrained Laya checkpoint in base/, and set up .venv with torch + laya
+.venv/bin/python train.py 3     # writes checkpoint/  (~65 min on Apple MPS)
+.venv/bin/python eval.py        # scores against test.jsonl
+```

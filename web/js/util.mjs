@@ -9,6 +9,9 @@ export const store = {
   set:(k,v)=>{ try{ localStorage.setItem('mca.'+k, JSON.stringify(v)) }catch{} },
 };
 
+export const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
+  ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
 const SVG = 'http://www.w3.org/2000/svg';
 export const el = (n,a={}) => { const e=document.createElementNS(SVG,n);
   for(const k in a) e.setAttribute(k,a[k]); return e; };
@@ -27,22 +30,20 @@ export function ticks(lo,hi,n){
   return out;
 }
 
-/** Trailing debounce with a ceiling.
+/** Run `fn` at once on every call; a call that arrives while it is running is
+    picked up the moment it returns, and any number of such calls collapse into
+    that one follow-up — which reads the latest state, so nothing is lost.
 
-    A plain debounce starves under a continuous stream: every call clears the
-    timer, so nothing runs until the stream stops. That is what made the sliders
-    look like they only updated on mouse-up. `budget()` returns the quiet gap to
-    wait for and the longest the oldest pending call may ever be held. */
-export function coalesce(fn, budget){
-  let t, oldest = 0;
-  const go = () => { clearTimeout(t); oldest = 0; fn(); };
-  return () => {
-    const now = performance.now();
-    if(!oldest) oldest = now;
-    const { wait, max } = budget();
-    if(now - oldest >= max) return go();
-    clearTimeout(t);
-    t = setTimeout(go, wait);
+    For the sliders. A debounce, even one with a ceiling, delayed each movement,
+    and letting a newer run discard the one before meant that a steady drag drew
+    nothing until the slider was let go. */
+export function latestOnly(fn){
+  let busy = false, again = false;
+  return async () => {
+    if(busy){ again = true; return; }
+    busy = true;
+    try { do { again = false; try { await fn(); } catch (e) { console.error(e); } } while(again); }
+    finally { busy = false; }
   };
 }
 

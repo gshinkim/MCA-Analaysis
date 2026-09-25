@@ -1,127 +1,15 @@
-// ===========================================================================
-//  Dockery & Keener (2001) -- quorum sensing in Pseudomonas aeruginosa
-//  Bull. Math. Biol. 63:95-116, doi:10.1006/bulm.2000.0205
-//
-//  Antimony transcription of the las-system ODE model.
-//  Two encodings of the SAME published model, in one file.
-//
-//  ---------------------------------------------------------------------
-//  LOADING
-//    import tellurium as te, antimony
-//    src = open("dockery_keener.ant").read()
-//    r = te.loada(src)                                  # -> dockery_keener_3state
-//    # to get the other one:
-//    antimony.loadAntimonyString(src)
-//    r2 = te.loadSBMLModel(antimony.getSBMLString("dockery_keener_2state"))
-//
-//  ---------------------------------------------------------------------
-//  STATE VARIABLES  (paper Table 1 and section 2)
-//    R    LasR
-//    A    3-oxo-C12-HSL, intracellular autoinducer
-//    E    3-oxo-C12-HSL, extracellular
-//    P    LasR/3-oxo-C12-HSL dimer -- algebraic, eq (17), not a state
-//    rho  local volume fraction of cells -- THE BIFURCATION PARAMETER
-//
-//  PUBLISHED PARAMETER SET  (paper, Fig. 2 caption -- inherited, not invented)
-//    V_R=1.16  V_A=2.0  K_R=0  K_A=1.0  R0=0.95  A0=0.61
-//    delta=0.625  k_E=0.1  k_R=0.875  k_A=0.02
-//  The Fig. 2 nullclines are drawn with P = R*A, so k_RA/k_P = 1.
-//
-//  ---------------------------------------------------------------------
-//  MODELLING CHOICES, and why
-//
-//  * Every published production and removal term is its own reaction, and
-//    basal synthesis is split from P-activated synthesis. Lumping them
-//    would make a control coefficient unattributable to a single step,
-//    which is the whole point of the downstream analysis.
-//
-//  * This is NOT the full 8-equation system of eqs (1)-(8). The paper
-//    never publishes a parameter set for that one. Encoded here is the
-//    reduced las-system model that the Fig. 2 parameters belong to.
-//
-//  * SETTING CELL DENSITY IN THE 3-STATE MODEL: rho lives in the
-//    compartment volumes, so set BOTH, and they must sum to 1:
-//        r["cell"] = rho;  r["medium"] = 1 - rho
-//    Compartments are deliberately plain constants, NOT assignment rules:
-//    an assignment-rule compartment makes libRoadRunner refuse to compute
-//    control coefficients ("... is defined by an assignment rule, and can
-//    not be set independently"). Checked, not assumed.
-//
-//  ---------------------------------------------------------------------
-//  VALIDATED (see VALIDATION.md)
-//    * the two encodings agree to 6 decimals at steady state, both branches
-//    * bistable switch with saddle-nodes at rho = 0.04156205 and 0.11435857
-//    * flux control coefficients sum to 1, conc. control to 0, to ~2e-16
-// ===========================================================================
+X->Y; kf1*X - kr1*Y
+Y->Z; kf2*Y - kr2*Z
+Z->W; kf3*Z - kr3*W
 
+kf1=0.5;
+kf2=0.4;
+kf3=0.3;
+kr1=0.055;
+kr2=0.15;
+kr3=0.1;
 
-// ===========================================================================
-//  MODEL 1 -- eqs (20),(21).  R, A.  Extracellular E eliminated by quasi-
-//  steady state into the density-dependent decay d(rho). This is the form
-//  the Fig. 2 parameter set belongs to, so it is the VALIDATION model.
-//  rho is a single plain parameter here -- just set r["rho"].
-// ===========================================================================
-model dockery_keener_2state()
-
-  J_R_basal:        => R;   R0;                       // basal lasR expression
-  J_R_synth:        => R;   V_R * P / (K_R + P);      // P-activated lasR
-  J_R_deg:     R    => ;    k_R * R;                  // LasR degradation
-
-  J_A_basal:        => A;   A0;                       // basal autoinducer synthesis
-  J_A_synth:        => A;   V_A * P / (K_A + P);      // LasI-mediated synthesis
-  J_A_removal: A    => ;    d_rho * A;                // degradation + density-dependent export
-
-  P     := kRA_over_kP * R * A;                                            // eq (17)
-  d_rho := k_A + (delta/rho) * (k_E*(1 - rho)) / (delta + k_E*(1 - rho));  // eq (21)
-
-  V_R = 2.0;    K_R = 1.0;   R0 = 0.05;   k_R = 0.7;
-  V_A = 2.0;    K_A = 1.0;   A0 = 0.05;   k_A = 0.02;
-  delta = 0.2;  k_E = 0.1;   kRA_over_kP = 2;
-
-  rho = 0.3;    // cell volume fraction
-
-  R = 0.34;
-  A = 0.385;
-end
-
-
-// ===========================================================================
-//  MODEL 2 -- eqs (15)-(19).  R, A, E explicit. The paper: "the behavior is
-//  not changed if a three-variable system is used."  This is the ANALYSIS
-//  model: membrane export stays a real step with its own flux, which matters
-//  because the paper's own mechanism for quorum sensing is that the DRAIN
-//  for A backs up.
-//
-//  Volume bookkeeping: cell has volume fraction rho and medium 1-rho, so the
-//  single transport step A -> E carries flux delta*(A-E) in AMOUNT/time and
-//  reproduces the delta/rho and delta/(1-rho) factors of eqs (19) and (18)
-//  from stoichiometry alone -- no hand-inserted scaling factors.
-// ===========================================================================
-model dockery_keener_3state()
-
-  compartment cell, medium;
-  cell   = 0.3;     // = rho        <- set this to change cell density
-  medium = 0.7;     // = 1 - rho    <- and this, together with it
-  species R in cell, A in cell, E in medium;
-
-  J_R_basal:      => R;   cell * R0;                      // eq (15)
-  J_R_synth:      => R;   cell * V_R * P / (K_R + P);
-  J_R_deg:   R    => ;    cell * k_R * R;
-
-  J_A_basal:      => A;   cell * A0;                      // eq (16)
-  J_A_synth:      => A;   cell * V_A * P / (K_A + P);
-  J_A_deg:   A    => ;    cell * k_A * A;
-
-  J_export:  A    => E;   delta * (A - E);                // eqs (18),(19)
-  J_E_deg:   E    => ;    medium * k_E * E;
-
-  P := kRA_over_kP * R * A;                               // eq (17)
-
-  V_R = 2.0;    K_R = 1.0;   R0 = 0.05;   k_R = 0.7;
-  V_A = 2.0;    K_A = 1.0;   A0 = 0.05;   k_A = 0.02;
-  delta = 0.2;  k_E = 0.1;   kRA_over_kP = 1.0;
-
-  R = 0.05;
-  A = 0.05;
-  E = 0.33;
-end
+X=11.4;
+Y=1;
+Z=1;
+W=0;

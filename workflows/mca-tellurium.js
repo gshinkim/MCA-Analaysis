@@ -26,7 +26,7 @@ const workdir = (IN.workdir ?? './mca-tellurium-runs/current').trim()
    with Bash; the local server runtime has run_python; the browser has typed
    Tellurium tools and no shell at all. Hard-coding "run it with Bash" ordered two
    of the three to call a tool they do not have, in the one stage they cannot skip. */
-const exec = (IN.exec ?? '').trim() ||
+const execNote = (IN.exec ?? '').trim() ||
   `Write a single runnable script into ${workdir} (create it if needed), run it with ` +
   `Bash, and keep both the script and its output on disk — they are the reproducibility record.`
 const needsNumbers = IN.needsNumbers !== false
@@ -239,7 +239,7 @@ DOCUMENTED CALLS: ${plan.calls.join(' | ')}
 TRAPS TO AVOID: ${plan.traps.join(' | ')}
 MODEL PATH: ${plan.build_path}
 ${correction ? `\nTHIS IS ATTEMPT ${attempt}. A previous run failed validation. Apply exactly this correction and change nothing else:\n${correction}\n` : ''}
-${exec}
+${execNote}
 Report the numbers labelled from the model's own id
 lists, and report the steady-state evidence verbatim as the software returned it.
 Report what happened, including a failure. Do not interpret anything.`,

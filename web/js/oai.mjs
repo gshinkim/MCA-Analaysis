@@ -135,12 +135,58 @@ as text instead, alone on its own lines, and stop:
 It is executed and the result comes back like any other tool result. Never describe
 a call you did not make, and never invent its output.`.trim();
 
+/**
+ * The two messages appended when a reasoning model is cut off mid-thought with
+ * nothing visible: put what got through back in front of it and ask for its next
+ * move — re-running the same request just makes it think again. Shared by the
+ * server runtime (backend/local-agent.mjs) and the browser runtime (localai.mjs),
+ * which used to have no equivalent retry at all. Also used when the model called
+ * a tool after tools were withdrawn (msg.closedCall): it is told to answer instead.
+ */
+export const cutoffNudge = (msg, hasTools) => msg.closedCall && msg.finish !== 'length' ? [
+  { role: 'user', content: 'Tools are closed for this turn: that call was not run. Do not ' +
+    'call any tool. Give the final answer now, in prose, from the results above, and say ' +
+    'what you could not finish.' },
+] : [
+  { role: 'assistant', content: msg.reasoning ?? '' },
+  { role: 'user', content: 'Your reasoning was cut off. Do not think any further and do ' +
+    'not repeat it. ' + (hasTools
+      ? 'Act now: make the next tool call your plan above calls for, or, if you already ' +
+        'have every result you need, give the final answer in full.'
+      : 'State the final answer now, in full, from what you worked out above.') },
+];
+
+/** Sent last whenever tools are closed (the wrap-up step). It says in words what
+    tool_choice 'none' said — LM Studio honours that by dropping the tool list from
+    the prompt, which is the prompt-cache miss the closed tools are re-sent to avoid. */
+export const closedNote = { role: 'user', content: 'Tools are closed for this turn: do not ' +
+  'call any tool. Give the final answer now, in prose, from the results above, and say ' +
+  'what you could not finish.' };
+
+/**
+ * Appended when Antimony is rejected. The tellurium SKILL.md routes to references
+ * and carries almost no syntax, so a model that loaded it still guessed — measured:
+ * qwen3.5:9b wrote `S1 -> S2; v1 = k1*S1` ten times in a row, each rejected, and
+ * got it right on the next write after it finally read antimony_basics.md.
+ */
+export const antimonyHint = readTool =>
+  '\n\n[hint] Call ' + readTool + '("skills/tellurium/references/antimony_basics.md") ' +
+  'before writing again — guessing the syntax fails the same way. A reaction is ' +
+  '`J1: S1 -> S2; k1*S1` (optional name and colon, reaction, semicolon, rate ' +
+  'expression); values go on their own lines: `k1 = 0.5`, `S1 = 10`.';
+
 /** Strip our own bookkeeping before a message goes back to the server.
-    `reasoning` and `finish_reason` are not part of the chat schema; echoing prior
-    thinking also degrades tool calling on Qwen-family models. */
+    `finish` is ours. `reasoning` goes back: within a turn a thinking model has to
+    see its own plan, and without it Qwen re-planned from zero after every tool
+    call — measured on Ollama: stripped, qwen3.8:27b could not say what it had
+    decided one step earlier; sent as `reasoning`, it could. Ollama reads
+    `reasoning`; LM Studio and the stock Qwen chat template read only
+    `reasoning_content`, so sent under one name the plan was silently dropped
+    there. Both go; a server that knows neither ignores them. */
 export const forHistory = m => ({
   role: 'assistant',
   content: m.content ?? '',
+  ...(m.reasoning ? { reasoning: m.reasoning, reasoning_content: m.reasoning } : {}),
   ...(m.tool_calls?.length && !isTextCall(m.tool_calls[0])
       ? { tool_calls: m.tool_calls.map(c => ({ ...c,
             function: { ...c.function, arguments: sendableArgs(c.function?.arguments) } })) }
@@ -294,7 +340,7 @@ export function stripToolSyntax(text) {
  * a server that ignores `stream: true` and returns one plain JSON body produced
  * an empty message, because every line failed the `data:` test.
  */
-export async function readCompletion(res, { onStream, toolNames = [] } = {}) {
+export async function readCompletion(res, { onStream, toolNames } = {}) {
   let reasoning = '', finish = '', frames = 0;
   const think = thinkStream(onStream);
   const calls = [];
@@ -340,7 +386,19 @@ export async function readCompletion(res, { onStream, toolNames = [] } = {}) {
   if (!tc.length) tc = textToolCalls(split.content, toolNames);
   // ...and some write it inside the scratchpad, where thinkStream had already moved it
   if (!tc.length && split.reasoning) tc = textToolCalls(split.reasoning, toolNames);
-  if (tc.length) msg.tool_calls = tc;
+  /* No tools offered means the caller wants the answer. Ollama still parses a
+     <tool_call> the model writes into tool_calls, and every loop ran it and ended
+     on "(no final answer)" — measured on qwen3.5:9b's wrap-up step. Flag it so
+     the caller can ask for prose instead. */
+  if (tc.length && toolNames && !toolNames.length) msg.closedCall = true;
+  else if (tc.length) msg.tool_calls = tc;
+  /* ...and a call written as text, which textToolCalls cannot match with no names
+     offered: stripToolSyntax erased it and the turn ended "(the model produced no
+     final answer)" with no retry — measured on bonsai-27b in LM Studio. */
+  else if (toolNames && !toolNames.length && /<tool_call>|<function=[\w.-]+>/.test(msg.content)) {
+    msg.closedCall = true;
+    msg.content = stripToolSyntax(msg.content).trim();
+  }
   return msg;
 }
 
@@ -364,6 +422,13 @@ export async function readCompletion(res, { onStream, toolNames = [] } = {}) {
    nothing here can see it. */
 export const CONTEXT_DEFAULT = 24576;
 const CHARS_PER_TOKEN = 3.5;
+
+/* Sampling for every local call. temperature 0.2 is near-greedy, and Qwen3's own
+   card warns greedy decoding makes thinking mode repeat without end — measured on
+   qwen3.8:27b: at 0.2 it re-derived the same Jacobian for 3000 tokens; at these
+   (Qwen's recommended thinking settings) it moved on to the answer. All three are
+   standard OpenAI parameters, so any compatible server accepts them. */
+export const SAMPLING = { temperature: 0.6, top_p: 0.95, presence_penalty: 1.0 };
 
 /* How the window is divided, as shares of it rather than absolute token counts:
    one setting then means the same thing on an 8k model and a 128k one. These
@@ -389,16 +454,29 @@ export const resultCap = (ctx = CONTEXT_DEFAULT, resultPct) =>
   Math.max(1500, Math.round(ctx * CHARS_PER_TOKEN * share(resultPct, 'resultPct') / 100));
 
 /** Tool steps a turn gets before it is made to answer with what it has. */
-export const stepBudget = steps => Math.round(share(steps, 'steps'));
+/** Settings → Budget → "No limit": the turn ends when the model answers, the same
+    call is repeated, the user presses Stop — or, for a workflow stage, its 15-minute clock. */
+export const NO_STEP_LIMIT = 'none';
+export const stepBudget = steps => steps === NO_STEP_LIMIT ? Infinity : Math.round(share(steps, 'steps'));
 
+// counts `reasoning` too: it goes back to the server with each step (see forHistory),
+// and leaving it out let the real prompt outgrow the window unseen
 export const estTokens = messages =>
   Math.ceil(messages.reduce((n, m) =>
-    n + String(m.content ?? '').length +
+    n + String(m.content ?? '').length + String(m.reasoning ?? '').length +
         (m.tool_calls ? JSON.stringify(m.tool_calls).length : 0) + 16, 0) / CHARS_PER_TOKEN);
 
 /**
- * Drop the oldest exchanges until the turn fits, keeping the system message and
- * the question.
+ * Make the turn fit, losing as little as possible, in three stages:
+ *
+ * 1. Drop the thinking of every step but the latest. The current plan is in the
+ *    latest step; older reasoning is the cheapest thing to lose.
+ * 2. Shorten tool results, oldest first, to their opening. Dropping them whole was
+ *    the defect: three Skills (~10k tokens) outgrew a 12k prompt budget, the call
+ *    that loaded them went, its results could not stay without it, and the model
+ *    was left with the bare question — so it loaded them again, and again.
+ * 3. Only then drop the oldest exchanges, keeping the system message and the
+ *    question.
  *
  * Cutting at an arbitrary point would leave a `tool` message whose call is gone,
  * which strict servers reject outright, so the window always starts on a message
@@ -411,13 +489,47 @@ export const estTokens = messages =>
  * that with HTTP 500 "no user query found in messages". Keeping it also keeps
  * the turn pointed at what was actually asked.
  */
+const QUESTION = Symbol('question');
+/** This turn's question, marked so fitMessages pins it rather than the oldest user
+    message. A Symbol key: JSON.stringify skips it, so the server never sees it. */
+export const userQuestion = content => ({ role: 'user', content, [QUESTION]: true });
+
+const SHORT_RESULT = 2000;   // chars an old tool result keeps once the window is tight
+
 export function fitMessages(messages, ctx = CONTEXT_DEFAULT, reserve = 1024) {
   const budget = Math.max(512, ctx - reserve);
   if (estTokens(messages) <= budget) return messages;
+
+  const lastStep = messages.findLastIndex(m => m.role === 'assistant');
+  messages = messages.map((m, i) => {
+    if (!m.reasoning || i === lastStep) return m;
+    const { reasoning, reasoning_content, ...rest } = m;
+    return rest;
+  });
+  if (estTokens(messages) <= budget) return messages;
+
+  for (let i = 0; i < messages.length && estTokens(messages) > budget; i++) {
+    const m = messages[i];
+    // Text-mode tool calling (toolResult) returns these as role:'user' "Result of
+    // ..." messages, not role:'tool' — skipping them here meant stage 3 dropped
+    // the whole exchange instead of shortening it, the "reload Skills again and
+    // again" failure this stage exists to prevent, on exactly the small models
+    // most likely to use text mode.
+    const isResult = m.role === 'tool' ||
+      (m.role === 'user' && String(m.content ?? '').startsWith('Result of '));
+    if (!isResult || String(m.content ?? '').length <= SHORT_RESULT) continue;
+    messages = messages.with(i, { ...m, content: String(m.content).slice(0, SHORT_RESULT) +
+      '\n…[shortened to fit the context window; call the tool again for the full text]' });
+  }
+  if (estTokens(messages) <= budget) return messages;
+
   const [system, ...rest] = messages;
   const head = messages[0]?.role === 'system' ? [system] : [];
   const body = head.length ? rest : messages;
-  const askAt = body.findIndex(m => m.role === 'user');
+  // The loop's own question when it marked one; with chat history in front, the
+  // first user message is the oldest of the conversation, not this turn's.
+  const marked = body.findLastIndex(m => m[QUESTION]);
+  const askAt = marked >= 0 ? marked : body.findIndex(m => m.role === 'user');
   const ask = askAt >= 0 ? [body[askAt]] : [];
   const tail = askAt >= 0 ? body.slice(askAt + 1) : body;
   const keep = [...head, ...ask];

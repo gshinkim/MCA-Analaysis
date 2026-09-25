@@ -160,7 +160,7 @@ Understand the biological question, and what the model has to answer
 | If the question is really about | Use |
 |---|---|
 | control coefficients, elasticities, summation/connectivity theorems, how control is distributed | `mca` |
-| the combined MCA + Tellurium workflow | `mca-tellurium` |
+| the combined MCA + Tellurium workflow | the `mca-tellurium` workflow (not a Skill) |
 | Tellurium/RoadRunner/Antimony API mechanics, debugging code and installs | `tellurium` |
 
 ## When you cannot answer

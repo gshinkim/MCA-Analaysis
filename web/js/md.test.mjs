@@ -89,8 +89,9 @@ console.log('html passthrough ok');
   assert.ok(out.includes('r="4"'), 'geometry kept');
   assert.ok(out.includes('S1'), 'label text kept');
 }
-// a gradient reference inside the same document is legitimate
-assert.ok(sanitizeSvg('<svg><rect fill="url(#g)"/></svg>').includes('url(#g)'),
+// a gradient reference inside the same document is legitimate — kept, but
+// namespaced along with every other id (see 'svg id namespacing' below)
+assert.ok(sanitizeSvg('<svg><rect fill="url(#g)"/></svg>').includes('url(#md-g)'),
   'internal url(#id) reference kept');
 console.log('svg passthrough ok');
 
@@ -108,6 +109,17 @@ for (const junk of ['<svg', '<svg><circle', '</svg>', '<<>>', '<svg><g><g></svg>
 // a sentinel typed by the model must not be able to reach held content
 lacks('\uE000 0 \uE000 ping', 'ping</pre>', 'a typed sentinel cannot forge a placeholder');
 console.log('malformed input ok');
+
+/* --------------------------- svg id namespacing --------------------------- */
+/* Agent-authored SVG shares the page's DOM. An unprefixed id could collide with
+   the app's own dialog ids ($('#sp'), $('#fp')) and silently break them. */
+assert.equal(sanitizeSvg('<svg><g id="sp"/></svg>'), '<svg><g id="md-sp"/></svg>',
+  'an svg id is namespaced');
+assert.ok(sanitizeSvg('<svg><path marker-end="url(#a)"/></svg>').includes('url(#md-a)'),
+  'a marker-end url(#x) reference is renamed to match');
+assert.ok(!sanitizeSvg('<svg><g id="sp"/></svg>').includes('id="sp"'),
+  'the bare unnamespaced id never survives');
+console.log('svg id namespacing ok');
 
 /* ------------------------------------ tex ------------------------------------ */
 /* Nothing renders maths, so TeX a model wrote anyway must arrive as readable text

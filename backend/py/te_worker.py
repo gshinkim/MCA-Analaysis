@@ -3,7 +3,7 @@
 Kept warm because `import tellurium` costs seconds and every keystroke in the UI
 triggers a run. Every reply carries `ok`; errors come back as data, never a crash.
 """
-import json, re, sys, time, traceback
+import json, math, re, sys, time, traceback
 
 import tellurium as te
 import roadrunner
@@ -14,12 +14,26 @@ CACHE = {}          # antimony source -> loaded model (reloading is the slow par
 MAX_STEPS = 500000          # CVODE's 20k default gives up on ordinary stiff models
 
 
+def clean(o):
+    """Replace non-finite floats with null so json.dumps(allow_nan=False) never raises
+    and the reply line stays valid JSON for Node to parse."""
+    if isinstance(o, float):
+        return o if math.isfinite(o) else None
+    if isinstance(o, dict):
+        return {k: clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [clean(v) for v in o]
+    return o
+
+
 def load(src):
     if src not in CACHE:
         CACHE.clear()               # one model at a time; the UI only ever shows one
         CACHE[src] = te.loada(src)
     r = CACHE[src]
     r.resetToOrigin()
+    if r.conservedMoietyAnalysis:
+        r.conservedMoietyAnalysis = False   # no leak between ops on the cached model
     try:
         r.integrator.setValue("maximum_num_steps", MAX_STEPS)
     except Exception:
@@ -261,7 +275,12 @@ def do_steady_state(q):
 def do_mca(q):
     r = load(q["model"])
     apply_overrides(r, q.get("overrides"))
+    r.conservedMoietyAnalysis = True
     dist = float(r.steadyState())
+    if dist > 1e-4:
+        raise ValueError(
+            "steady-state solver did not converge (residual %.3g); control "
+            "coefficients are only defined at a steady state" % dist)
 
     def mat(m):
         return {"rows": list(m.rownames), "cols": list(m.colnames),
@@ -307,10 +326,12 @@ def main():
                 result["source"] = "tellurium"          # the UI refuses to plot without this
                 result["engine"] = {"tellurium": te.__version__,
                                     "roadrunner": roadrunner.__version__}
-            print(json.dumps({"ok": True, "id": q.get("id"), "result": result}), flush=True)
+            print(json.dumps(clean({"ok": True, "id": q.get("id"), "result": result}),
+                             allow_nan=False), flush=True)
         except Exception as e:
-            print(json.dumps({"ok": False, "id": q.get("id"), "error": str(e),
-                              "trace": traceback.format_exc()[-1500:]}), flush=True)
+            sys.stderr.write(traceback.format_exc()); sys.stderr.flush()
+            print(json.dumps(clean({"ok": False, "id": q.get("id"), "error": str(e)}),
+                             allow_nan=False), flush=True)
 
 
 if __name__ == "__main__":

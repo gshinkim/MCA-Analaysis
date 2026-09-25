@@ -1,61 +1,67 @@
-/* node --test web/js/util.test.mjs
-   The slider bug: a plain trailing debounce never fires while the input keeps
-   coming, so dragging a slider only re-simulated on mouse-up. */
+/* node web/js/util.test.mjs
+   The slider bug: runs were debounced and each newer one discarded the last, so a
+   steady drag drew nothing until the slider was let go. Every movement must run at
+   once, and movements that arrive mid-run must still end in a run of the latest. */
 import assert from 'node:assert/strict';
-import { coalesce } from './util.mjs';
+import { latestOnly } from './util.mjs';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-/** Drive a burst of calls at `every` ms for `ms`, the way a held slider does. */
-async function drag(fn, ms, every = 8) {
-  const t0 = performance.now();
-  while (performance.now() - t0 < ms) { fn(); await sleep(every); }
-}
-
-/* ---- the regression: a continuous stream must still produce runs ---- */
+/* ---- the first movement runs immediately, not after a quiet gap ---- */
 {
   let runs = 0;
-  const f = coalesce(() => runs++, () => ({ wait: 30, max: 100 }));
-  await drag(f, 500);
-  assert.ok(runs >= 3, `a 500ms drag at a 100ms ceiling should run repeatedly, got ${runs}`);
-  assert.ok(runs <= 25, `...but must still coalesce, got ${runs}`);
-  console.log('continuous input keeps running ok (' + runs + ' runs in 500ms)');
-}
-
-/* ---- and it must still coalesce a burst, which is the point of debouncing ---- */
-{
-  let runs = 0;
-  const f = coalesce(() => runs++, () => ({ wait: 30, max: 1000 }));
-  for (let i = 0; i < 50; i++) f();          // 50 calls in one synchronous tick
-  assert.equal(runs, 0, 'nothing runs synchronously');
-  await sleep(120);
-  assert.equal(runs, 1, 'a burst inside the ceiling collapses to one run');
-  console.log('burst coalescing ok');
-}
-
-/* ---- a quiet gap still produces the trailing run ---- */
-{
-  let runs = 0;
-  const f = coalesce(() => runs++, () => ({ wait: 20, max: 1000 }));
+  const f = latestOnly(async () => { runs++; await sleep(50); });
   f();
-  await sleep(100);
-  assert.equal(runs, 1, 'trailing edge fires once input stops');
-  f();
-  await sleep(100);
-  assert.equal(runs, 2, 'the next burst is independent');
-  console.log('trailing edge ok');
+  assert.equal(runs, 1, 'a movement starts its run synchronously');
+  console.log('immediate run ok');
 }
 
-/* ---- the ceiling is measured from the OLDEST pending call, not the newest ---- */
+/* ---- movements during a run collapse into ONE follow-up, which sees the latest value ---- */
 {
-  const seen = [];
-  const f = coalesce(() => seen.push(performance.now()), () => ({ wait: 500, max: 80 }));
+  let value = 0; const seen = [];
+  const f = latestOnly(async () => { seen.push(value); await sleep(40); });
+  f();                                        // runs with 0
+  for (value = 1; value <= 20; value++) f();  // 20 movements while it runs
+  value = 20;
+  await sleep(150);
+  assert.deepEqual(seen, [0, 20], 'one follow-up run, with the latest value');
+  console.log('mid-run movements collapse to the latest ok');
+}
+
+/* ---- a steady drag keeps producing runs the whole way through ---- */
+{
+  let runs = 0;
+  const f = latestOnly(async () => { runs++; await sleep(30); });
   const t0 = performance.now();
-  await drag(f, 300);
-  // with wait(500) > max(80) the trailing timer can never win; only the ceiling can
-  assert.ok(seen.length >= 2, `ceiling must fire without the trailing timer, got ${seen.length}`);
-  assert.ok(seen[0] - t0 < 200, 'the first run comes at the ceiling, not at the end');
-  console.log('ceiling beats the trailing timer ok');
+  while (performance.now() - t0 < 400) { f(); await sleep(8); }
+  assert.ok(runs >= 8, `a 400ms drag with 30ms runs should run continuously, got ${runs}`);
+  console.log('continuous drag keeps running ok (' + runs + ' runs in 400ms)');
+}
+
+/* ---- a run that throws does not wedge the slider ---- */
+{
+  let runs = 0;
+  const f = latestOnly(async () => { runs++; throw new Error('tellurium error'); });
+  await f().catch(() => {});
+  await f().catch(() => {});
+  assert.equal(runs, 2, 'the next movement still runs after a failed one');
+  console.log('recovers after an error ok');
+}
+
+/* ---- a queued follow-up still runs when the run ahead of it throws ---- */
+{
+  let runs = 0, secondRan = false;
+  const f = latestOnly(async () => {
+    runs++;
+    if (runs === 1) throw new Error('boom');
+    secondRan = true;
+  });
+  f();                                         // starts, will throw
+  f();                                         // queued while the first is in flight
+  await sleep(20);
+  assert.equal(runs, 2, 'the first call still ran once');
+  assert.equal(secondRan, true, 'the queued follow-up still ran after the throw');
+  console.log('queued follow-up survives a throw ok');
 }
 
 console.log('util.test.mjs ok');

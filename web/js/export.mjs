@@ -94,7 +94,6 @@ export function initImport(onLoad){
     onLoad(text, f.name);
   };
   $('#openBtn').onclick = () => input.click();
-  $('#saveAntBtn').onclick = downloadAntimony;
 
   // dropping a .ant on the editor is the obvious gesture; support it
   const drop = $('#editorWrap');

@@ -5,11 +5,15 @@ const post = async (url, body) => {
 };
 
 export const getEnv      = ()      => fetch('/api/env').then(r=>r.json());
-export const getModel    = ()      => fetch('/api/model').then(r=>r.json());
-export const putModel    = src     => fetch('/api/model', { method:'PUT',
-  headers:{'content-type':'application/json'}, body: JSON.stringify({src}) }).then(r=>r.json());
+// `project` is the open project's folder id; without one it is the default model
+export const getModel    = project => fetch('/api/model' +
+  (project ? '?project=' + encodeURIComponent(project) : '')).then(r=>r.json());
+export const putModel    = (src, project) => fetch('/api/model', { method:'PUT',
+  headers:{'content-type':'application/json'}, body: JSON.stringify({src, project}) }).then(r=>r.json());
 export const putSettings = s       => fetch('/api/settings', { method:'PUT',
   headers:{'content-type':'application/json'}, body: JSON.stringify(s) }).then(r=>r.json());
+export const getSettings = ()      => fetch('/api/settings').then(r=>r.json());
+export const info        = model   => post('/api/info', { model });
 
 /* Local runtimes are found and driven by our own server, so the page never talks
    to localhost itself — no CORS flag on the model server, no browser prompt. */
@@ -34,7 +38,10 @@ export function chat(opts, onEvent){
         headers:{'content-type':'application/json'},
         body: JSON.stringify(opts) });
     }catch(e){
-      if(e.name!=='AbortError') onEvent({type:'fatal', error:String(e.message||e)});
+      // Stop pressed before the server even answered: no fatal, just end the turn
+      // like any other abort, so the UI unbusies and doesn't log a fake exchange.
+      if(e.name==='AbortError'){ onEvent({type:'closed'}); return; }
+      onEvent({type:'fatal', error:String(e.message||e)});
       return;
     }
     if(!res.ok || !res.body){

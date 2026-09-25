@@ -5,7 +5,7 @@ import { listSessions } from './session.mjs';
    search field where the path row was. Reusing .fp means no second modal to keep
    in visual sync with the first. */
 
-let resolveFn = null, rows = [], picked = null, mode = 'open', marked = new Set();
+let resolveFn = null, rows = [], picked = null, mode = 'open', marked = new Set(), built = false;
 
 /** Name or id, case-insensitively. Exported so it can be tested without a DOM. */
 export const matches = (s, q) => {
@@ -15,7 +15,10 @@ export const matches = (s, q) => {
 };
 
 function ensureDom(){
-  if($('#sp')) return;
+  // A DOM-presence check (`if($('#sp')) return`) can be spoofed by agent-authored
+  // SVG carrying an id="sp" (md.mjs); a module flag can't be.
+  if(built) return;
+  built = true;
   const d = document.createElement('div');
   d.id = 'sp'; d.className = 'fp'; d.setAttribute('role','dialog');
   d.innerHTML = `

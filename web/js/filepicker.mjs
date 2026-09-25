@@ -1,12 +1,16 @@
-import { $ } from './util.mjs';
+import { $, esc } from './util.mjs';
 
 /* The browser cannot hand back a real filesystem path from <input type=file>,
    so this browses the server's filesystem and returns the absolute path. */
 
-let resolveFn = null, cur = null, filter = '', picked = null, dirsOnly = false;
+let resolveFn = null, cur = null, filter = '', picked = null, dirsOnly = false, built = false;
 
 function ensureDom(){
-  if($('#fp')) return;
+  // A DOM-presence check here (`if($('#fp')) return`) is a footgun: agent-authored
+  // SVG can inject an element with this id (md.mjs), which would make this return
+  // early with no dialog ever built. A module flag can't be spoofed that way.
+  if(built) return;
+  built = true;
   const d=document.createElement('div');
   d.id='fp'; d.className='fp'; d.setAttribute('role','dialog'); d.setAttribute('aria-label','Choose a file');
   d.innerHTML=`
@@ -41,7 +45,7 @@ async function load(path){
   if(path) q.set('path', path);
   if(filter) q.set('ext', filter);
   const r = await fetch('/api/fs?'+q).then(r=>r.json());
-  if(r.error){ $('#fpList').innerHTML='<p class="hint" style="padding:12px">'+r.error+'</p>'; return; }
+  if(r.error){ $('#fpList').innerHTML='<p class="hint" style="padding:12px">'+esc(r.error)+'</p>'; return; }
   cur = r; picked = null;
   $('#fpCur').textContent = r.path;
   // choosing a folder means choosing the one you are standing in, so the button

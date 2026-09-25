@@ -1,0 +1,59 @@
+{"state": {"request": "Build a model of a linear three-step pathway X0 -> S1 -> S2 -> X1 with Michaelis-Menten kinetics", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Write me an Antimony model of glycolysis upper half with hexokinase and PFK", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Add negative feedback from S3 onto the first enzyme", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Change the rate law of J2 to reversible mass action", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Make a toggle switch model with two mutually repressing genes", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Add a conserved moiety ATP/ADP to the model", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Set up a stochastic version of this model and run a Gillespie simulation", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Create a gene expression model with transcription and translation and degradation", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "simulate this model for 100 seconds", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium"]}
+{"state": {"request": "Plot the time course of S1 and S2 from 0 to 50", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium"]}
+{"state": {"request": "What is the steady state of this model?", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium"]}
+{"state": {"request": "Run a parameter scan of k1 from 0.1 to 10 and plot the flux", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium"]}
+{"state": {"request": "Export the model as SBML", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium"]}
+{"state": {"request": "Why does roadrunner give a CVODE error when I simulate?", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium"]}
+{"state": {"request": "Compute the eigenvalues of the Jacobian at steady state", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium", "pathway-modeling"]}
+{"state": {"request": "Is this model bistable? Find both steady states", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["tellurium", "pathway-modeling"]}
+{"state": {"request": "Compute the flux control coefficients for this pathway", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "Which step is rate-limiting in this model?", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "Calculate the scaled elasticities of every reaction", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "How is control distributed across the pathway? Give numbers", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "Check that the flux control coefficients sum to one for this model", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "What are the concentration control coefficients of S2?", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "Compute response coefficients of J to the inhibitor I", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "How does the feedback change control of the flux? Compare with and without it", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["mca", "tellurium"]}
+{"state": {"request": "Explain the summation theorem", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "What is the connectivity theorem and why does it hold?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "What is the difference between an elasticity and a control coefficient?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "Derive the flux control coefficients for a two-step pathway symbolically", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "Why is there no single rate-limiting step in most pathways?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "Explain loop gain in a negative feedback pathway", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "What does the branch-point theorem say?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca"]}
+{"state": {"request": "Explain ultrasensitivity in a covalent modification cycle", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["mca", "pathway-modeling"]}
+{"state": {"request": "What is a stoichiometry matrix?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling"]}
+{"state": {"request": "Explain Michaelis-Menten kinetics and its assumptions", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling"]}
+{"state": {"request": "How do I estimate parameters from time-course data?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling"]}
+{"state": {"request": "What is a feedforward loop motif?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": ["pathway-modeling"]}
+{"state": {"request": "hi", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": []}
+{"state": {"request": "thanks, that's all", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": []}
+{"state": {"request": "What's the capital of France?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": []}
+{"state": {"request": "Rename this chat to glycolysis", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": []}
+{"state": {"request": "Write a haiku about enzymes", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": []}
+{"state": {"request": "How do I change the theme of the app?", "loaded": [], "recent": [], "model": "empty", "step": 0}, "need": []}
+{"state": {"request": "Build a model of a linear pathway with feedback", "loaded": ["pathway-modeling"], "recent": ["load_skill pathway-modeling -> ok"], "model": "empty", "step": 1}, "need": ["tellurium"]}
+{"state": {"request": "Build a model of a linear pathway with feedback", "loaded": ["pathway-modeling", "tellurium"], "recent": ["load_skill pathway-modeling -> ok", "load_skill tellurium -> ok", "write_file workspace/model.txt -> ok"], "model": "has model", "step": 3}, "need": []}
+{"state": {"request": "Compute the flux control coefficients", "loaded": ["mca"], "recent": ["load_skill mca -> ok", "run_python -> AttributeError: 'RoadRunner' object has no attribute 'getCC2'"], "model": "has model", "step": 3}, "need": ["tellurium"]}
+{"state": {"request": "simulate this model", "loaded": [], "recent": ["run_python -> AttributeError: module 'tellurium' has no attribute 'loadAntimonyModel'"], "model": "has model", "step": 1}, "need": ["tellurium"]}
+{"state": {"request": "simulate this model", "loaded": [], "recent": ["run_python -> NameError: name 'Simulator' is not defined"], "model": "has model", "step": 1}, "need": ["tellurium"]}
+{"state": {"request": "Add a second enzyme to the pathway", "loaded": [], "recent": ["write_file workspace/model.txt -> REFUSED \u2014 building or changing the model needs the pathway-modeling Skill."], "model": "has model", "step": 1}, "need": ["pathway-modeling"]}
+{"state": {"request": "Add a second enzyme to the pathway", "loaded": ["pathway-modeling"], "recent": ["load_skill pathway-modeling -> ok", "write_file workspace/model.txt -> REJECTED \u2014 that Antimony does not load: syntax error at line 3"], "model": "has model", "step": 2}, "need": ["tellurium"]}
+{"state": {"request": "Which step is rate-limiting?", "loaded": ["tellurium"], "recent": ["load_skill tellurium -> ok", "run_python -> ok"], "model": "has model", "step": 2}, "need": ["mca"]}
+{"state": {"request": "Which step is rate-limiting?", "loaded": ["tellurium", "mca"], "recent": ["load_skill mca -> ok", "run_python -> ok"], "model": "has model", "step": 4}, "need": []}
+{"state": {"request": "What is the steady state?", "loaded": ["tellurium"], "recent": ["load_skill tellurium -> ok", "run_python -> ok"], "model": "has model", "step": 2}, "need": []}
+{"state": {"request": "Compute elasticities", "loaded": ["mca"], "recent": ["run_python -> ValueError: Steady state failed to converge"], "model": "has model", "step": 3}, "need": ["tellurium"]}
+{"state": {"request": "Build a glycolysis model and compute its control coefficients", "loaded": ["pathway-modeling", "tellurium"], "recent": ["load_skill pathway-modeling -> ok", "load_skill tellurium -> ok", "write_file workspace/model.txt -> ok"], "model": "has model", "step": 3}, "need": ["mca"]}
+{"state": {"request": "Explain the summation theorem with an example from this model", "loaded": ["mca"], "recent": ["load_skill mca -> ok"], "model": "has model", "step": 1}, "need": ["tellurium"]}
+{"state": {"request": "Fit k1 and k2 to the data in data.csv", "loaded": ["pathway-modeling"], "recent": ["load_skill pathway-modeling -> ok", "read_file workspace/runs/data.csv -> ok"], "model": "has model", "step": 2}, "need": ["tellurium"]}
+{"state": {"request": "Fit k1 and k2 to the data in data.csv", "loaded": [], "recent": ["read_file workspace/runs/data.csv -> ok"], "model": "has model", "step": 1}, "need": ["pathway-modeling", "tellurium"]}
+{"state": {"request": "Is this model stable?", "loaded": ["tellurium"], "recent": ["run_python -> ok"], "model": "has model", "step": 2}, "need": ["pathway-modeling"]}
+{"state": {"request": "Why does conservation make the Jacobian singular?", "loaded": [], "recent": [], "model": "has model", "step": 0}, "need": ["pathway-modeling", "mca"]}

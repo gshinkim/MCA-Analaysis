@@ -33,6 +33,12 @@ export const worthSaving = (sessionDirId, isTouched) => sessionDirId != null || 
 let chain = Promise.resolve();
 export const saveNow = () => (chain = chain.then(doSave, doSave));
 
+/* Resolves once whatever save is currently in flight (a rename, a first save that's
+   still claiming a folder id) has settled, success or failure — never rejects. A
+   model PUT that races that save can land in the OLD id (rename) or in the shared
+   default file (first save still pending); await this before it. */
+export const saveIdle = () => chain.catch(() => {});
+
 async function doSave() {
   if (S.env?.hosted) return null;
   if (!worthSaving(S.sessionDirId, touched)) return null;
@@ -44,8 +50,10 @@ async function doSave() {
   return r;
 }
 
-/* Autosave is debounced, and deferred while a turn is running: renaming the folder
-   out from under a running agent breaks the absolute paths it is holding. `deleting`
+/* Autosave is debounced. It is NOT held back while a turn runs: a rename lands at once,
+   and the server keeps the running turn's paths working (sessions.mjs holdDir/follow).
+   Holding it back made the rename land at the turn's end, mid-compression, and that
+   turn's history was lost. `deleting`
    blocks a save from being armed (or re-armed) while deleteCurrent() is in flight —
    without it, a save timer set just before delete(), or one set by a stray caller
    DURING the delete's own await, can fire after the folder is gone and recreate it.
@@ -53,27 +61,23 @@ async function doSave() {
    rule out two overlapping deleteCurrent() calls, and with a boolean the FIRST
    call's finally would clear it while the SECOND call's post() is still pending,
    reopening the window. Only the last delete to settle may re-enable saving. */
-let t = null, busy = false, pending = false, scheduled = false, deleting = 0;
+let t = null, scheduled = false, deleting = 0;
 export function saveSoon() {
   if (deleting > 0) return;             // a delete is in flight — never arm a save for it
   touch();                              // every caller is a user action
   clearTimeout(t);
   scheduled = true;
-  t = setTimeout(() => { scheduled = false; if (busy) { pending = true; return; } saveNow(); }, 800);
-}
-export function setTurnBusy(on) {
-  busy = on;
-  if (!on && pending && deleting === 0) { pending = false; saveNow(); }
+  t = setTimeout(() => { scheduled = false; saveNow(); }, 800);
 }
 
-/* A debounce still outstanding (or deferred behind a busy turn) targets whoever
+/* A debounce still outstanding targets whoever
    S.sessionDirId is RIGHT NOW. Call this before that changes, or the save either
    never happens (the old session silently loses its last turn/rename) or fires
    after the switch and re-saves the wrong, now-current session. */
 async function flushPending() {
-  if (!scheduled && !pending) return;
+  if (!scheduled) return;
   clearTimeout(t);
-  scheduled = false; pending = false;
+  scheduled = false;
   await saveNow();
 }
 
@@ -82,7 +86,7 @@ async function flushPending() {
    what the user just asked for ("I deleted it and it comes back"). */
 function cancelPending() {
   clearTimeout(t);
-  scheduled = false; pending = false;
+  scheduled = false;
 }
 
 export async function openSessionById(id) {

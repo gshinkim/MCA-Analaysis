@@ -63,8 +63,8 @@ user turned it off deliberately, because the full seven-stage sequence is slow.
 Do not ask for it back and do not refuse the work.
 
 Do the analysis directly instead, and keep every other rule in your definition:
-inspect the model before any claim about it, load the \`mca\` and \`tellurium\` Skills
-with the Skill tool before asserting anything either of them is the authority on,
+inspect the model before any claim about it, load a Skill with the Skill tool 
+when you need its detail use each skill as much as you can instead of using your own knowledge,
 compute nothing from memory - every number still comes from a Tellurium run you
 performed - and still say how well supported each part of your answer is.
 
@@ -95,14 +95,29 @@ export const summaryBlock = text => !text?.trim() ? '' : `
 ## Project history
 
 Your own record of this project: a summary of everything older, then the
-latest turns (what was asked, how you reasoned, what you answered). Treat it as
-established, and do not re-derive it.
+latest turns (what was asked, how you reasoned, what you answered). It is not
+a tool result: a number from it may be stale, and the live model may have
+changed since. Any number you report this turn comes from a tool call you
+make this turn.
 
 ${text.trim()}
 `;
 
+/* In a project the live model is that project's own model.txt. The agent definition
+   and the text above name workspace/model.txt throughout; point every mention at the
+   project's file, and say so outright, so no edit lands in the default model. */
+export const projectModel = (text, modelPath) => modelPath === 'workspace/model.txt' ? text :
+  text.replaceAll('workspace/model.txt', modelPath) + `
+
+## This project's model
+
+THE LIVE MODEL for this project is \`${modelPath}\`. Wherever your agent definition
+says workspace/model.txt, it means this file. Never read or edit workspace/model.txt:
+that is the default model, not this project's.`;
+
 export function buildArgs({ root, prompt, sid, resuming, model, useWorkflow = true,
-                            liveModel = '', scratch = '', summary = '' }) {
+                            liveModel = '', modelPath = 'workspace/model.txt',
+                            scratch = '', summary = '' }) {
   const args = [
     '-p', prompt,
     '--agent', AGENT,
@@ -119,14 +134,14 @@ export function buildArgs({ root, prompt, sid, resuming, model, useWorkflow = tr
     // read/edit files in the project, and nothing else. Widen only deliberately.
     '--allowedTools',
     'Skill', ...(useWorkflow ? ['Workflow'] : []), 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'TodoWrite',
-    'Bash(./.venv/bin/python:*)', 'Bash(.venv/bin/python:*)', 'Bash(cat:*)', 'Bash(ls:*)',
+    'Bash(./.venv/bin/python:*)', 'Bash(.venv/bin/python:*)',
     // The agent writes scripts to the working folder by absolute path, so it runs the
     // venv by absolute path too — often after a `cd`. A plain absolute-path rule never
     // matches (the path is quoted: spaces, parentheses); the leading * does.
     `Bash(*${root}/.venv/bin/python*)`,
-    '--append-system-prompt', SYSTEM_APPEND + (scratch ? scratchBlock(scratch) : '') +
+    '--append-system-prompt', projectModel(SYSTEM_APPEND + (scratch ? scratchBlock(scratch) : '') +
                               liveModelBlock(liveModel) + summaryBlock(summary) +
-                              (useWorkflow ? '' : '\n\n' + NO_WORKFLOW),
+                              (useWorkflow ? '' : '\n\n' + NO_WORKFLOW), modelPath),
     '--settings', JSON.stringify({ enableWorkflows: useWorkflow }),
     '--add-dir', root,
     ...(scratch && !scratch.startsWith(root) ? ['--add-dir', scratch] : []),
@@ -136,7 +151,7 @@ export function buildArgs({ root, prompt, sid, resuming, model, useWorkflow = tr
 }
 
 export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow = true,
-                          liveModel = '', scratch = '', summary = '', resume = false, onEvent }) {
+                          liveModel = '', modelPath, scratch = '', summary = '', resume = false, onEvent }) {
   /* STARTED only knows about this process's own runs. A session loaded from disk
      was claimed by an earlier run of this server, so the caller says so with
      `resume` — without it the CLI is handed an id it has already claimed and the
@@ -145,15 +160,15 @@ export function runAgent({ root, prompt, sessionId, model, env = {}, useWorkflow
   const sid = resuming ? sessionId : randomUUID();
   STARTED.add(sid);
   const args = buildArgs({ root, prompt, sid, resuming, model, useWorkflow,
-                           liveModel, scratch, summary });
+                           liveModel, modelPath, scratch, summary });
 
   const proc = spawn('claude', args, {
     cwd: root,
     // extended thinking is off by default in print mode; the UI has a place to show it.
-    // Ambient shell first, then the code's own default, then the caller's own env
-    // last — so a stray MAX_THINKING_TOKENS in the parent shell can't silently beat
-    // the default, but an explicit caller override still wins over both.
-    env: { ...process.env, MAX_THINKING_TOKENS: '6000', ...env },
+    // Only MAX_THINKING_TOKENS is a caller override — the request body's `env` is not
+    // otherwise merged into the child process (it used to be, letting a direct POST
+    // set PATH, CLAUDE_*, proxy vars, etc. for the `claude` subprocess).
+    env: { ...process.env, MAX_THINKING_TOKENS: String(env.MAX_THINKING_TOKENS ?? '6000') },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
 

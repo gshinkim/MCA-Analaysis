@@ -1,4 +1,4 @@
-import { $, css, el, fmt, ticks, SERIES } from './util.mjs';
+import { $, css, el, fmt, ticks, SERIES, esc } from './util.mjs';
 
 /* Eight hues, assigned in fixed order. Past eight, identity moves to a second
    channel (dash) rather than a ninth invented hue, so no two series ever share
@@ -16,16 +16,21 @@ export function renderLegend(){
     const d=dashOf(i);
     b.innerHTML='<span class="key'+(d?' dash':'')+'" style="'+
       (d ? 'background:repeating-linear-gradient(90deg,'+hueOf(i)+' 0 5px,transparent 5px 8px)'
-         : 'background:'+hueOf(i))+'"></span>'+n;
+         : 'background:'+hueOf(i))+'"></span>'+esc(n);
     b.onclick=()=>{ S.hidden.has(n)?S.hidden.delete(n):S.hidden.add(n); draw(); };
     L.append(b);
   });
 }
 
+// The result last rendered: a chart redraw (every zoom or pan step) must not rebuild
+// thousands of rows it already shows — that rebuild is what made the page lag.
+let tabled;
 export function renderTable(){
   const v=$('#tableView'); const r=S.result;
+  if(r===tabled && v.firstChild) return;
+  tabled=r;
   if(!r){ v.textContent=''; return; }
-  let h='<table><thead><tr><th>t</th>'+r.names.map(n=>'<th>'+n+'</th>').join('')+'</tr></thead><tbody>';
+  let h='<table><thead><tr><th>t</th>'+r.names.map(n=>'<th>'+esc(n)+'</th>').join('')+'</tr></thead><tbody>';
   r.t.forEach((tv,i)=>{ h+='<tr><td>'+fmt(tv)+'</td>'+r.cols.map(c=>'<td>'+fmt(c[i])+'</td>').join('')+'</tr>'; });
   v.innerHTML=h+'</tbody></table>';
 }
@@ -138,7 +143,7 @@ export function draw(){
       dots.append(el('circle',{cx:x(t[i]),cy:y(v),r:4.5,fill:c,stroke:css('--surface'),'stroke-width':2}));
       rows+='<div class="row"><span style="display:inline-flex;align-items:center;gap:7px">'+
         '<span style="width:9px;height:9px;border-radius:50%;background:'+c+'"></span>'+
-        r.names[j]+'</span><b>'+fmt(v)+'</b></div>';
+        esc(r.names[j])+'</span><b>'+fmt(v)+'</b></div>';
     });
     tip.innerHTML=rows; tip.style.opacity=1;
     const px=x(t[i]);
@@ -146,7 +151,13 @@ export function draw(){
     tip.style.top=Math.max(8,Math.min(H-tip.offsetHeight-8,ev.clientY-rect.top-30))+'px';
   });
   hit.addEventListener('mouseleave',hide);
-  if($('#tableBtn').getAttribute('aria-pressed')==='true') renderTable();
+  if(!$('#tablePage').hidden) renderTable();
+}
+
+export function showTable(on){
+  $('#tablePage').hidden=!on;
+  $('#tableBtn').setAttribute('aria-pressed',on);
+  if(on){ renderTable(); $('#tableDone').focus(); }
 }
 
 /* ---------------- time-axis zoom & pan ---------------- */
@@ -189,12 +200,8 @@ export function initChartInteractions(){
                    removeEventListener('mousemove',mv); removeEventListener('mouseup',up); };
     addEventListener('mousemove',mv); addEventListener('mouseup',up);
   });
-  $('#tableBtn').onclick = e => {
-    const on = e.currentTarget.getAttribute('aria-pressed')!=='true';
-    e.currentTarget.setAttribute('aria-pressed',on);
-    $('#tableView').hidden=!on;
-    if(on) renderTable();
-  };
+  $('#tableBtn').onclick  = ()=>showTable(true);
+  $('#tableDone').onclick = ()=>showTable(false);
   new ResizeObserver(()=>{ clearTimeout(window.__rz); window.__rz=setTimeout(draw,60); })
     .observe($('#svgWrap'));
 }

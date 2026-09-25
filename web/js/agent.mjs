@@ -1,7 +1,7 @@
 import { localChat } from './localai.mjs';
-import { forHistory, toolRunner, toolResult, resultCap, CONTEXT_DEFAULT,
-         REPEAT_LIMIT, stripToolSyntax, missingArgs, stepBudget } from './oai.mjs';
-import { localSystem } from './prompt.mjs';
+import { forHistory, userQuestion, toolRunner, toolResult, resultCap, CONTEXT_DEFAULT,
+         REPEAT_LIMIT, stripToolSyntax, missingArgs, stepBudget, antimonyHint } from './oai.mjs';
+import { localSystem, SKILL_NOTE } from './prompt.mjs';
 import * as api from './api.mjs';
 
 /* The agent, running in the page. Inference happens on the user's machine; the
@@ -17,10 +17,16 @@ const strip = md => md.replace(/^---\n[\s\S]*?\n---\n/, '').trim();
 
 const cache = new Map();
 const text = async url => {
-  if (!cache.has(url)) cache.set(url, fetch(url).then(r => {
-    if (!r.ok) throw new Error('could not load ' + url + ' (HTTP ' + r.status + ')');
-    return r.text();
-  }));
+  if (!cache.has(url)) {
+    // A rejected promise must not stick around: one transient failure loading a
+    // Skill or the workflow would otherwise fail every later load forever.
+    const p = fetch(url).then(r => {
+      if (!r.ok) throw new Error('could not load ' + url + ' (HTTP ' + r.status + ')');
+      return r.text();
+    });
+    cache.set(url, p);
+    p.catch(() => cache.delete(url));
+  }
   return cache.get(url);
 };
 
@@ -65,9 +71,13 @@ function tools(getModel, setModel, emit){
     read_model: async () => getModel(),
     write_model: async ({ antimony }) => {
       if (!antimony?.trim()) throw new Error('antimony is empty');
-      const r = await api.simulate({ model: antimony, start: 0, end: 10, points: 5 });
+      // Gate on load, not on integrating a time course: a valid stiff or
+      // currently-singular draft must be saveable here exactly as it is locally
+      // (backend/local-agent.mjs write_file uses the same te.call('info') gate).
+      const r = await api.info(antimony);
       if (!r.ok) return 'REJECTED - that model does not load: ' + r.error +
-                        '\nThe live model is unchanged. Fix it and call write_model again.';
+                        '\nThe live model is unchanged. Fix it and call write_model again.' +
+                        antimonyHint('read_reference');
       setModel(antimony);
       return 'saved; the editor now shows this model';
     },
@@ -102,7 +112,7 @@ function tools(getModel, setModel, emit){
     S('list_skills', 'List the Skills available in this project.', {}),
     S('load_skill', 'Load a Skill before making any claim it is the authority on.',
       { name: { type:'string',
-                enum:['mca','tellurium','mca-tellurium','pathway-modeling'] } }, ['name']),
+                enum:['mca','tellurium','pathway-modeling'] } }, ['name']),
     S('read_reference', 'Read one reference file named by a Skill, e.g. skills/mca/references/x.md.',
       { path: { type:'string' } }, ['path']),
     S('read_model', 'Read the live Antimony model from the editor.', {}),
@@ -185,8 +195,11 @@ function fill(o, schema){
 export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel, useWorkflow = true, onEvent }){
   const ctrl = new AbortController();
   const emit = onEvent;
-  const chat = ({ messages, tools, schema, onStream }) =>
-    localChat({ ...cfg, messages, tools, schema, signal: ctrl.signal, onStream });
+  let open;   // the last tools offered, re-sent closed on wrap-up (see localChat)
+  const chat = ({ messages, tools, schema, onStream }) => {
+    if (tools?.length) open = tools;
+    return localChat({ ...cfg, messages, tools, closedTools: open, schema, signal: ctrl.signal, onStream });
+  };
 
   (async () => {
     try {
@@ -231,8 +244,7 @@ export function runBrowserAgent({ cfg, prompt, history = [], getModel, setModel,
             question:{type:'string'}, needsNumbers:{type:'boolean'} }, required:['question'] } } }]
           : tk.defs };
 
-      const messages = [{ role:'system', content: system }, ...history,
-                        { role:'user', content: prompt }];
+      const messages = [{ role:'system', content: system }, ...history, userQuestion(prompt + SKILL_NOTE)];
       const run = toolRunner(all.impl, WRITES);
       const lacks = missingArgs(all.defs);
       let final = '', usedTools = false, computed = false;

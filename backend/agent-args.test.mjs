@@ -31,4 +31,21 @@ const base = { root: '/tmp/app', prompt: 'hi', sid: 'abc-123', model: '',
   assert.doesNotMatch(appended, /Project history/, 'no empty history block');
 }
 
+{
+  // A1-9: cat/ls read any file on the machine; Read/Glob/Grep (scoped by --add-dir)
+  // already cover reading, so the broad Bash rules must be gone.
+  const args = buildArgs({ ...base, resuming: false });
+  assert.ok(!args.includes('Bash(cat:*)'), 'Bash(cat:*) must not be allowed');
+  assert.ok(!args.includes('Bash(ls:*)'), 'Bash(ls:*) must not be allowed');
+  assert.ok(args.includes('Bash(./.venv/bin/python:*)'), 'the venv python rule must stay');
+}
+
+{
+  // A3-22: history must not be treated as a tool result the model can quote from memory
+  const withSummary = buildArgs({ ...base, resuming: true, summary: 'Step 3 holds the control.' });
+  const appended = withSummary[withSummary.indexOf('--append-system-prompt') + 1];
+  assert.doesNotMatch(appended, /Treat it as established, and do not re-derive it\./);
+  assert.match(appended, /not\s+a tool result/);
+}
+
 console.log('agent args ok');

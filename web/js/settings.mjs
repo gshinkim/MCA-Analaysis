@@ -1,10 +1,10 @@
-import { $, $$, store, flash } from './util.mjs';
+import { $, $$, store, flash, esc } from './util.mjs';
 import { S } from './state.mjs';
 import * as api from './api.mjs';
 import { pickFile } from './filepicker.mjs';
 import { probe as probeLocal, permissionState } from './localai.mjs';
 import { BUDGET, BUDGET_LIMITS, CONTEXT_DEFAULT, replyTokens, resultCap,
-         stepBudget } from './oai.mjs';
+         stepBudget, NO_STEP_LIMIT } from './oai.mjs';
 
 /* Two agent runtimes:
    - claude-code : spawns the Claude Code CLI; real Skill/Workflow tools.
@@ -17,7 +17,8 @@ const BUILTIN = [
   { id:'sonnet', t:'Claude Sonnet 5' },
   { id:'haiku',  t:'Claude Haiku 4.5' },
 ];
-const DEF = { endpoints: [], useWorkflow: true, scratchDir: '', budget: { ...BUDGET }, localCfg:{
+const DEF = { endpoints: [], useWorkflow: true, scratchDir: '', budget: { ...BUDGET },
+  router: { enabled: false, provider: 'laya', key: '', auto: false }, localCfg:{
   olUrl:'http://localhost:11434', lmUrl:'http://localhost:1234', ggufPath:'', ggufUrl:'http://localhost:8080' } };
 
 /* Every local server the settings pane can hold. This used to be a radio group, so
@@ -35,6 +36,7 @@ const LOCAL = [
 
 export const settings = () => ({ ...DEF, ...store.get('settings', {}),
                                  budget:   { ...BUDGET,        ...(store.get('settings',{}).budget||{}) },
+                                 router:   { ...DEF.router,    ...(store.get('settings',{}).router||{}) },
                                  localCfg: { ...DEF.localCfg, ...(store.get('settings',{}).localCfg||{}) } });
 
 let draft = null;
@@ -44,6 +46,10 @@ export const useWorkflow = () => settings().useWorkflow !== false;
 /* '' means the install's own workspace/runs — the server resolves the default, so
    the page never has to know an absolute path it did not choose. */
 export const scratchDir = () => settings().scratchDir || '';
+/* The Skill router (backend/router.mjs): one provider, Layla (local) or Jev (key). */
+export const router = () => settings().router;
+
+const noSlash = u => String(u || '').replace(/\/+$/, '');
 
 export function resolveModel(sel){
   const s = settings();
@@ -54,17 +60,22 @@ export function resolveModel(sel){
   // 'auto:<baseUrl>|<model>' — a runtime found by /api/local/scan, nothing saved
   if(kind==='auto'){
     const i = model.lastIndexOf('|');
-    return { runtime:'openai', chatCfg:{ baseUrl: model.slice(0,i), model: model.slice(i+1),
-                                         ...s.budget } };
+    if (i < 0) return { runtime:'claude-code', model:'opus' };
+    const baseUrl = model.slice(0,i), name = model.slice(i+1);
+    // if this scanned server is also configured on the Local models tab, use the
+    // context window set there instead of the server default
+    const L = LOCAL.find(l => noSlash(s.localCfg[l.url]) === noSlash(baseUrl));
+    return { runtime:'openai', chatCfg:{ baseUrl, model: name,
+      contextTokens: L ? (+s.localCfg[L.ctx] || undefined) : undefined, ...s.budget } };
   }
   const L = LOCAL.find(l => l.id === kind);
   if(L) return { runtime:'openai', chatCfg:{
     baseUrl: s.localCfg[L.url], model: model || 'local',
     contextTokens: +s.localCfg[L.ctx] || undefined, ...s.budget } };
   if(kind==='ep'){
-    const i = +model.split('|')[0], name = model.split('|').slice(1).join('|');
-    const ep = s.endpoints[i];
-    return ep ? { runtime:'openai', chatCfg:{ baseUrl: ep.base, apiKey: ep.key, model: name,
+    const i = model.indexOf('|');
+    const ep = s.endpoints.find(e => e.base === model.slice(0, i));
+    return ep ? { runtime:'openai', chatCfg:{ baseUrl: ep.base, apiKey: ep.key, model: model.slice(i+1),
                                               contextTokens: +ep.ctx || undefined, ...s.budget } }
               : { runtime:'claude-code', model:'opus' };
   }
@@ -80,8 +91,10 @@ export function modelOptions(){
   // scan never silently changes which model is selected
   (S.local?.servers ?? []).forEach(sv => sv.models.forEach(m =>
     out.push({ v:'auto:'+sv.base+'|'+m, t: sv.kind+' · '+m })));
-  s.endpoints.forEach((e,i)=>(e.models||'').split(',').map(m=>m.trim()).filter(Boolean)
-    .forEach(m=>out.push({ v:'ep:'+i+'|'+m, t:(e.name||'Endpoint')+' · '+m })));
+  // keyed by base URL, not list position — removing an earlier endpoint must not
+  // silently repoint a saved selection at a different server (audit #19)
+  s.endpoints.forEach(e=>(e.models||'').split(',').map(m=>m.trim()).filter(Boolean)
+    .forEach(m=>out.push({ v:'ep:'+e.base+'|'+m, t:(e.name||'Endpoint')+' · '+m })));
   const local = s.localCfg;
   // every server that has models, all at once — the picker is the only place they meet
   LOCAL.forEach(L => (local[L.models]||'').split(',').map(m=>m.trim()).filter(Boolean)
@@ -97,7 +110,11 @@ export function modelOptions(){
 }
 
 export function fillModels(){
-  const opts=modelOptions(), cur=store.get('modelSel','cc:opus');
+  const opts=modelOptions();
+  let cur=store.get('modelSel','cc:opus');
+  // selections saved before endpoints were keyed by URL: ep:<index>|<model>
+  const old=/^ep:(\d+)\|(.*)$/.exec(cur), ep=old && settings().endpoints[+old[1]];
+  if(ep){ cur='ep:'+ep.base+'|'+old[2]; store.set('modelSel', cur); }
   [$('#modelPick'),$('#modelPick2')].forEach(sel=>{
     sel.textContent='';
     opts.forEach(o=>{ const e=document.createElement('option'); e.value=o.v; e.textContent=o.t; sel.append(e); });
@@ -107,7 +124,12 @@ export function fillModels(){
     }
     sel.value = opts.some(o=>o.v===cur) ? cur : (opts[0]?.v ?? '');
   });
-  store.set('modelSel', $('#modelPick').value);
+  // On first boot S.local is still null, so a saved `auto:` selection has no
+  // matching option yet and the picker falls back to opts[0]. Only persist that
+  // fallback when the saved choice truly is not an `auto:` one — otherwise a
+  // scan never silently overwrites which model is selected (audit #17).
+  if (opts.some(o => o.v === cur) || !cur.startsWith('auto:'))
+    store.set('modelSel', $('#modelPick').value);
 }
 
 /* ---- what is already running on this machine ---- */
@@ -125,6 +147,8 @@ function renderFound(){
   const box = $('#locFound'); if(!box) return;
   const L = S.local, up = L?.servers ?? [];
   const n = up.reduce((a,s)=>a+s.models.length, 0);
+  // LM Studio's app can be open with its server off; then none of its models are listed
+  const lmsDown = !!L?.lmstudio && !up.some(s=>s.kind==='LM Studio');
   const detail =
       L?.hosted ? 'This is a hosted deployment — it cannot see your machine. Use the settings below.'
     : n         ? up.map(s=>s.kind+' ('+s.models.length+')').join(', ') +
@@ -132,12 +156,13 @@ function renderFound(){
     : up.length ? up.map(s=>s.kind).join(', ')+' is running but serves no model yet.'
     : L?.ollama ? 'Ollama is installed but not running.'
     :             'Nothing found. Install Ollama, then press Start.';
+  const extra = lmsDown ? ' LM Studio is installed but its server is off.' : '';
   box.innerHTML =
     '<div class="envrow"><span class="dot'+(n?'':' err')+'"></span><b>On this machine</b>'+
-    '<span class="hint" style="margin:0">'+detail+'</span></div>'+
+    '<span class="hint" style="margin:0">'+detail+extra+'</span></div>'+
     (L?.hosted ? '' :
       '<div style="margin:8px 0 4px"><button class="btn sm" id="locStart">'+
-      (n ? 'Rescan' : 'Start Ollama')+'</button> <span class="probe" id="locMsg"></span></div>')+
+      (lmsDown ? 'Start LM Studio' : n ? 'Rescan' : L?.ollama ? 'Start Ollama' : 'Start')+'</button> <span class="probe" id="locMsg"></span></div>')+
     (!L?.hosted && !n ?
       '<p class="hint">A model still has to exist locally: <code>ollama pull qwen3:8b</code>.</p>' : '');
   const b = $('#locStart'); if(!b) return;
@@ -153,12 +178,29 @@ function renderFound(){
 }
 
 /* ---- endpoints tab ---- */
-/* Probes straight from the browser — that is the whole point: the request has to
-   come from the page so the browser can prompt for local network access, and so
-   the model server sees this site's origin. */
+/* Hosted: the server has no route to the user's machine, so the request has to
+   come from the browser — that's also the only way to get a local-network
+   permission prompt. Non-hosted: probe from the server instead, so a keyed
+   endpoint that answers 401 to a bare browser fetch (no CORS, needs the key)
+   still gets probed correctly, and so the model server sees the app's own
+   origin rather than whatever page the user happens to be on. */
 async function probe(baseUrl, apiKey, into){
   into.className='probe'; into.textContent='Connecting…';
-  const r = await probeLocal(baseUrl);
+  if(!S.env?.hosted){
+    const r = await fetch('/api/probe', { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ baseUrl, apiKey }) }).then(r=>r.json())
+      .catch(e=>({ ok:false, error:String(e.message||e) }));
+    if(r.ok){
+      into.className='probe ok';
+      into.textContent = '✓ '+r.models.length+' model'+(r.models.length===1?'':'s')+' available'+
+        (r.models.length ? ': '+r.models.join(', ') : '');
+      return r.models;
+    }
+    into.className='probe bad';
+    into.textContent = '✕ '+r.error;
+    return null;
+  }
+  const r = await probeLocal(baseUrl, apiKey);
   if(r.status==='ok'){
     into.className='probe ok';
     into.textContent = '✓ '+r.detail+(r.models?.length ? ': '+r.models.join(', ') : '');
@@ -308,7 +350,10 @@ function draftCtx(){
   const [kind, ...rest] = sel.split(':');
   const L = LOCAL.find(l => l.id === kind);
   if(L) return +draft.localCfg[L.ctx] || CONTEXT_DEFAULT;
-  if(kind === 'ep') return +draft.endpoints[+rest.join(':').split('|')[0]]?.ctx || CONTEXT_DEFAULT;
+  if(kind === 'ep'){
+    const m = rest.join(':'), i = m.indexOf('|');
+    return +draft.endpoints.find(e => e.base === m.slice(0, i))?.ctx || CONTEXT_DEFAULT;
+  }
   /* Nothing local is selected — a Claude model, or nothing yet. Size the numbers
      against the biggest window configured instead of the default, so dragging the
      context slider in the other tab is visibly connected to these. */
@@ -338,11 +383,25 @@ function renderBudget(){
     note:v=>n(resultCap(draftCtx(), v))+' characters of any one tool result reach the model; '+
             'the rest is cut. '+v+'% of the window (default '+BUDGET.resultPct+'%).' }));
 
+  const unlimited = () => b.steps===NO_STEP_LIMIT;
+  let lastSteps = unlimited() ? BUDGET.steps : b.steps;
   budgetNotes.push(slider(c, {
     label:'Tool steps', range:BUDGET_LIMITS.steps,
-    get:()=>b.steps, set:v=>{ b.steps=v; },
-    note:v=>stepBudget(v)+' tool calls before the agent is made to answer with what it has; '+
+    get:()=>unlimited() ? lastSteps : b.steps, set:v=>{ lastSteps=v; if(!unlimited()) b.steps=v; },
+    note:v=>unlimited() ? 'No limit: the agent keeps calling tools until it answers, repeats '+
+            'the same call, or you press Stop. A workflow stage still stops at 15 minutes.'
+          : stepBudget(v)+' tool calls before the agent is made to answer with what it has; '+
             'a workflow stage gets '+Math.max(2, stepBudget(v)-2)+'. Default '+BUDGET.steps+'.' }));
+  const stepsRow=c.lastElementChild;
+  const off=document.createElement('label'); off.className='switch';
+  off.innerHTML='<input type="checkbox"><span><span class="t">No step limit</span>'+
+    '<span class="d">Let the agent work until it is done. On a slow local model a long task '+
+    'can then run for many minutes.</span></span>';
+  const box=off.querySelector('input');
+  const sync=()=>{ box.checked=unlimited();
+    stepsRow.querySelectorAll('input').forEach(i=>i.disabled=unlimited()); };
+  box.onchange=()=>{ b.steps = box.checked ? NO_STEP_LIMIT : lastSteps; sync(); budgetNotes.forEach(f=>f()); };
+  sync(); c.append(off);
 
   const note=document.createElement('p'); note.className='hint';
   const against=document.createElement('p'); against.className='hint';
@@ -358,12 +417,40 @@ function renderBudget(){
   c.append(note);
 }
 
+/* ---- skill router (runtime tab) ---- */
+function renderRouter(){
+  const r = draft.router, sync = () => { $('#rtBox').disabled = !r.enabled;
+    $('#rtJev').hidden = r.provider !== 'jev'; $('#rtLaya').hidden = r.provider !== 'laya'; };
+  $('#rtToggle').checked = r.enabled; $('#rtKey').value = r.key; $('#rtAuto').checked = r.auto;
+  document.querySelectorAll('[name=rtProv]').forEach(x => {
+    x.checked = x.value === r.provider;
+    x.onchange = () => { r.provider = x.value; $('#rtMsg').textContent = ''; sync(); };
+  });
+  $('#rtMsg').className = 'probe'; $('#rtMsg').textContent = '';
+  $('#rtToggle').onchange = e => { r.enabled = e.target.checked; sync(); };
+  $('#rtKey').oninput = e => { r.key = e.target.value.trim(); };
+  $('#rtAuto').onchange = e => { r.auto = e.target.checked; };
+  $('#rtTest').onclick = async () => {
+    const who = r.provider === 'laya' ? 'Layla' : 'Jev';
+    const out = $('#rtMsg'); out.className = 'probe'; out.textContent = 'Asking '+who+'…';
+    const x = await fetch('/api/router/test', { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ provider: r.provider, key: r.key }) }).then(r => r.json())
+      .catch(e => ({ ok:false, error:String(e.message||e) }));
+    out.className = 'probe ' + (x.ok ? 'ok' : 'bad');
+    out.textContent = x.ok ? '✓ '+who+' works ('+x.ms+' ms) — "simulate this model": ' +
+      Object.entries(x.p).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+' '+v.toFixed(2)).join(', ')
+      : '✕ '+x.error;
+  };
+  sync();
+}
+
 /* ---- drawer ---- */
 export function openSettings(){
   draft = structuredClone(settings());
   renderEndpoints(); renderLocal(); renderBudget(); renderEnv(); renderFound(); renderScratch();
   $('#wfToggle').checked = draft.useWorkflow !== false;
   $('#wfToggle').onchange = e => { draft.useWorkflow = e.target.checked; };
+  renderRouter();
   $('#settings').classList.add('on'); $('#scrim').classList.add('on');
   $('#settingsBtn').setAttribute('aria-expanded','true');
   $('#saveMsg').textContent='';
@@ -381,8 +468,8 @@ function renderEnv(){
   const e=S.env, box=$('#envBox');
   if(!e){ box.innerHTML='<p class="hint" style="margin:0">Checking…</p>'; return; }
   const row=(ok,label,detail)=>
-    '<div class="envrow"><span class="dot '+(ok?'':'err')+'"></span><b>'+label+'</b>'+
-    '<span class="hint" style="margin:0">'+detail+'</span></div>';
+    '<div class="envrow"><span class="dot '+(ok?'':'err')+'"></span><b>'+esc(label)+'</b>'+
+    '<span class="hint" style="margin:0">'+esc(detail)+'</span></div>';
   box.innerHTML =
     row(e.telluriumInstalled,'Tellurium',
         e.telluriumInstalled ? 'v'+e.tellurium.tellurium+' · roadrunner '+e.tellurium.roadrunner+
@@ -413,7 +500,7 @@ async function chooseScratch(){
   const r = await fetch('/api/scratch', { method:'POST',
     headers:{'content-type':'application/json'}, body: JSON.stringify({ dir }) })
     .then(r=>r.json()).catch(e=>({ ok:false, error:String(e.message||e) }));
-  if(!r.ok){ $('#scratchMsg').innerHTML = '<span class="err">'+r.error+'</span>'; return; }
+  if(!r.ok){ $('#scratchMsg').innerHTML = '<span class="err">'+esc(r.error)+'</span>'; return; }
   draft.scratchDir = r.dir;
   renderScratch();
   $('#scratchMsg').textContent = 'Checked and writable. Save to apply.';
@@ -436,5 +523,9 @@ export function initSettings(){
   });
   [$('#modelPick'),$('#modelPick2')].forEach(s=>s.onchange=()=>{
     store.set('modelSel',s.value); $('#modelPick').value=s.value; $('#modelPick2').value=s.value;
+    // unload whatever local model this replaces, so the two never share GPU memory
+    const c = resolveModel(s.value).chatCfg;
+    fetch('/api/local/eject', { method:'POST', headers:{'content-type':'application/json'},
+      body: JSON.stringify({ baseUrl: c?.baseUrl, model: c?.model }) }).catch(()=>{});
   });
 }

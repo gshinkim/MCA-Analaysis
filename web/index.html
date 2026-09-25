@@ -64,9 +64,6 @@
         <span class="sub">antimony</span>
         <span class="spacer"></span>
         <button class="btn sm ghost" id="openBtn" title="Load an Antimony .ant file from disk">Open .ant</button>
-        <button class="btn sm ghost" id="saveAntBtn" title="Download this model as an Antimony .ant file">Save .ant</button>
-        <button class="btn sm ghost" id="setDefault"
-                title="Save the current model and simulation settings as this workspace's default">Set as default</button>
         <button class="btn sm primary" id="rerunBtn" title="Rerun simulation (⌘/Ctrl + ⏎)">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
             <path d="M20 11a8 8 0 1 0-2.3 6.3"/><path d="M20 4v6h-6"/></svg>
@@ -113,7 +110,6 @@
         <div id="svgWrap">
           <svg id="chart" role="img" aria-label="Concentration versus time"></svg>
           <div id="tip" role="status"></div>
-          <div id="tableView" hidden></div>
         </div>
         <div id="plotActions">
           <div class="dl-wrap">
@@ -143,8 +139,10 @@
         <div class="sect">
           <div class="sect-hd">
             <h3>Simulation</h3><span class="spacer"></span>
+            <button class="btn sm ghost" id="setDefault"
+                    title="Save the current model and simulation settings as this workspace's default">Set default</button>
             <button class="btn sm ghost" id="resetAll"
-                    title="Restore the saved default model and settings">Reset to default</button>
+                    title="Restore the saved default model and settings">Reset</button>
             <button class="btn sm ghost" id="closePanel" aria-label="Hide side panel">Hide</button>
           </div>
           <div class="grid3">
@@ -188,6 +186,17 @@
     </aside>
   </main>
 
+  <!-- the simulation table: its own full-screen page, so the trackpad scrolls it
+       instead of zooming the chart underneath -->
+  <section id="tablePage" hidden aria-label="Simulation table">
+    <div class="bar">
+      <span class="ttl">Simulation table</span>
+      <span class="sp"></span>
+      <button class="btn sm primary" id="tableDone">Done <kbd style="background:rgba(255,255,255,.22);border-color:transparent;color:inherit">Esc</kbd></button>
+    </div>
+    <div id="tableView"></div>
+  </section>
+
   <!-- bottom AI launcher -->
 <div id="aiBar">
   <select id="modelPick" aria-label="AI model"></select>
@@ -204,6 +213,10 @@
   <div class="hd">
     <select id="chatPick" aria-label="Conversation"></select>
     <button class="btn icon ghost sm" id="newChat" aria-label="New chat" title="New chat">+</button>
+    <button class="btn icon ghost sm" id="delChat" aria-label="Delete this chat" title="Delete this chat">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg></button>
     <span class="spacer" style="flex:1"></span>
     <select id="modelPick2" aria-label="AI model"></select>
     <button class="btn icon ghost sm" id="chatSave" aria-label="Export conversation as Markdown"
@@ -245,6 +258,43 @@
             Off, the agent analyses directly &mdash; same Skills, same Tellurium, no orchestration.</span>
         </span>
       </label>
+      <label class="switch" for="rtToggle">
+        <input type="checkbox" id="rtToggle">
+        <span>
+          <span class="t">Recommend Skills</span>
+          <span class="d">Before each step a Skill router estimates which Skills the agent needs
+            and tells it. Local and Claude runtimes only.</span>
+        </span>
+      </label>
+      <fieldset id="rtBox" class="rtbox">
+        <div style="display:flex;gap:8px;align-items:center;margin-top:10px">
+          <div class="seg" role="radiogroup" aria-label="Skill router">
+            <label><input type="radio" name="rtProv" value="laya"><span>Layla (local)</span></label>
+            <label><input type="radio" name="rtProv" value="jev"><span>Jev (API)</span></label>
+          </div>
+          <button class="btn sm" id="rtTest" type="button">Test</button>
+        </div>
+        <p class="hint" id="rtLaya" style="margin:6px 0 0">The fine-tuned Laya model in
+          <code>Layla (altlernative to jev)/</code>, on this machine. Nothing leaves it; no key.
+          The first call loads the model (~10&nbsp;s).</p>
+        <div id="rtJev">
+          <label class="lb" for="rtKey" style="margin-top:10px">Jev API key</label>
+          <input class="field" type="password" id="rtKey" placeholder="sk-..." autocomplete="off" style="width:100%">
+          <p class="hint" style="margin:6px 0 0">From <a href="https://console.typesafe.ai/settings/keys"
+            target="_blank" rel="noopener">console.typesafe.ai/settings/keys</a>. It stays in this browser.
+            Sends your request and a short list of the agent&rsquo;s recent steps to TypeSafe &mdash;
+            never the model or file contents.</p>
+        </div>
+        <div class="probe" id="rtMsg"></div>
+        <label class="switch" for="rtAuto">
+          <input type="checkbox" id="rtAuto">
+          <span>
+            <span class="t">Auto-load confident Skills (&ge; 0.85)</span>
+            <span class="d">Puts the Skill straight into the model&rsquo;s input instead of a hint.
+              Leave off until <code>backend/router-eval</code> shows it is precise at 0.85.</span>
+          </span>
+        </label>
+      </fieldset>
       <div id="scratchRow" hidden>
         <div class="lb" style="margin-top:16px">Working folder</div>
         <p class="hint" style="margin:2px 0 8px">Where the AI writes its scripts, data and

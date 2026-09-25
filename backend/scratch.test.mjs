@@ -13,17 +13,22 @@ import { scratchBlock } from './agent.mjs';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const scratch = await mkdtemp(join(tmpdir(), 'mca-scratch-'));
 
-/* A model that runs one script writing a file by a relative path, then answers. */
+/* A model that loads the three Skills (every turn must), runs one script writing a
+   file by a relative path, then answers. */
 let turn = 0;
+const call = (name, args) => ({ tool_calls: [{ index: 0, id: 'c' + turn, type: 'function',
+  function: { name, arguments: JSON.stringify(args) } }] });
 const srv = createServer((req, res) => {
+  // like any non-Ollama server: the context probe (/api/ps, /api/show) gets a 404
+  if (!req.url.endsWith("/chat/completions")) { res.writeHead(404); return res.end(); }
   let b = '';
   req.on('data', c => (b += c));
   req.on('end', () => {
     const withTools = (JSON.parse(b).tools ?? []).length > 0;
-    const delta = withTools && turn++ === 0
-      ? { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'run_python',
-          arguments: JSON.stringify({ code:
-            "open('result.txt','w').write('from the scratch dir')\nprint('done')" }) } }] }
+    const t = withTools ? turn++ : 99;
+    const delta = t < 3 ? call('load_skill', { name: ['mca', 'pathway-modeling', 'tellurium'][t] })
+      : t === 3 ? call('run_python', { code:
+            "open('result.txt','w').write('from the scratch dir')\nprint('done')" })
       : { content: 'Ran it.' };
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     res.end('data: ' + JSON.stringify({ choices: [{ delta }] }) + '\n\ndata: [DONE]\n\n');

@@ -33,8 +33,10 @@ r.getFullEigenValues()       # eigenvalues of the full Jacobian
 r.getReducedEigenValues()    # eigenvalues of the reduced Jacobian
 r.getEigenValueIds()         # selection symbols, of the form eigen(XX)
 ```
-Both eigenvalue calls return "a real matrix, first column real part, second
-column imaginary part" `[L:rr/cls_RoadRunner]`.
+Both eigenvalue calls are documented as returning "a real matrix, first column
+real part, second column imaginary part" `[L:rr/cls_RoadRunner]`, but the
+installed roadrunner returns a 1-D complex numpy array: use `ev.real` and
+`ev.imag`, not columns.
 
 Two documented restrictions `[L:rr/cls_RoadRunner]`:
 

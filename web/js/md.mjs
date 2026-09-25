@@ -44,11 +44,17 @@ const NUKE = /<\s*(script|style|foreignObject|iframe|object|embed|animate|set|ha
 
 const ATTR_RE = /([A-Za-z_:][-\w:.]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
 
+// Agent-authored SVG shares the page's DOM. An unprefixed id (or a url(#x) /
+// href="#x" reference to one) can collide with the app's own dialog ids
+// ($('#sp'), $('#fp'), ...) and break them. Every id this sanitizer lets
+// through, and every reference to one, is namespaced so it can never collide.
+const NS = v => 'md-' + v;
+
 function attrsFor(raw, ATTR_OK) {
   const out = [];
   for (const m of raw.matchAll(ATTR_RE)) {
     const name = m[1], lower = name.toLowerCase();
-    const val = m[2] ?? m[3] ?? m[4] ?? '';
+    let val = m[2] ?? m[3] ?? m[4] ?? '';
     if (lower.startsWith('on')) continue;              // every event handler, always
     if (!ATTR_OK.has(lower)) continue;
     if (BAD_URL.test(val)) continue;
@@ -57,6 +63,9 @@ function attrsFor(raw, ATTR_OK) {
     // url(#grad) is the only reference form worth keeping; anything reaching out
     // of the document is not a diagram
     if (/url\s*\(/i.test(val) && !/^[^(]*url\s*\(\s*#/i.test(val)) continue;
+    if (lower === 'id') val = NS(val);
+    else if (lower === 'href' && val.startsWith('#')) val = '#' + NS(val.slice(1));
+    else if (/url\s*\(\s*#/i.test(val)) val = val.replace(/url\s*\(\s*#([^)]*)\)/gi, (_, id) => 'url(#' + NS(id) + ')');
     out.push(ATTR_OK.get(lower) + '="' + esc(val) + '"');
   }
   return out.length ? ' ' + out.join(' ') : '';

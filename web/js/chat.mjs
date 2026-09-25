@@ -1,11 +1,11 @@
 import { $, store, flash } from './util.mjs';
 import { S } from './state.mjs';
 import * as api from './api.mjs';
-import { resolveModel, useWorkflow, scratchDir, openSettings } from './settings.mjs';
+import { resolveModel, useWorkflow, scratchDir, router, openSettings } from './settings.mjs';
 import { runBrowserAgent } from './agent.mjs';
 import { renderMarkdown } from './md.mjs';
 import { downloadChat } from './export.mjs';
-import { currentId, touch, saveNow, saveSoon, setTurnBusy, openSessionById, deleteSessionById, newProject } from './session.mjs';
+import { currentId, touch, saveNow, saveSoon, openSessionById, deleteSessionById, newProject } from './session.mjs';
 import { pickSession } from './sessionpicker.mjs';
 
 const SUGGEST = [
@@ -120,6 +120,21 @@ function makeChat(){
   return c;
 }
 
+/* Deletes the chat on screen. The project's history.md, the AI's memory of the
+   project, is kept: it is one record for the whole project, not per chat. */
+function deleteChat(){
+  const c = cur(); if(!c) return;
+  if(c.history.length && !confirm('Delete the chat "' + c.title + '"?\n\nIts messages are removed ' +
+       'from this project. The project history the AI remembers is kept.')) return;
+  if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
+  c.thread.remove();
+  chats.splice(chats.indexOf(c), 1);
+  if(chats.length) show(chats.at(-1).id); else makeChat();
+  // a saved project must forget it; an unsaved one has nothing on disk to update,
+  // and saveSoon() would create a folder for it
+  if(currentId() != null) saveSoon();
+}
+
 function show(id){
   active = id;
   chats.forEach(c => { c.thread.hidden = c.id !== id; });
@@ -170,7 +185,6 @@ function send(){
   $('#ask').value=''; $('#ask').style.height='auto';
   $('#sugg').hidden=true;
   $('#send').textContent='Stop';
-  setTurnBusy(true);
 
   const sel = store.get('modelSel','cc:opus');
   const rt  = resolveModel(sel);
@@ -197,7 +211,7 @@ function send(){
   const addTool = t => {
     const label = t.name==='Workflow'    ? 'workflow: mca-tellurium'
                 : t.name==='run_python' || t.name==='python' ? 'python'
-                : t.name==='load_skill'  ? 'skill: '+(t.input?.name ?? '?')
+                : t.name==='load_skill'  ? 'skill: '+(t.input?.name ?? '?')+(t.input?.by ? ' ('+t.input.by+')' : '')
                 : t.name==='Skill'       ? 'skill: '+(t.input?.skill ?? '?')
                 : t.name==='read_file'   ? 'read'
                 : t.name==='write_file'  ? 'write'
@@ -305,14 +319,18 @@ function send(){
         if(body && !text.innerHTML.trim()) text.innerHTML = renderMarkdown(body);
         if(!logged){
           logged = true;
-          c.log.push({ q: v, a: body, tools: [...seen].filter(x => !x.startsWith('phase:')) });
-          const acts = [...seen].filter(x => !x.startsWith('phase:'));
-          c.history.push({ role:'user', content: v });
-          c.history.push({ role:'assistant', content: (body || '(no answer)') +
-            (acts.length ? '\n\n[tools used this turn: '+acts.join(', ')+']' : '') });
-          // The server path keeps memory in history.md and never reads this; only the
-          // hosted in-browser agent does, so keep it bounded.
-          if(c.history.length > 24) c.history.splice(0, c.history.length - 24);
+          // A turn stopped before it produced anything, or one that failed outright,
+          // is not a real exchange — don't persist a "(no answer)" pair for it.
+          if(!failed && (body || ev.type === 'done')){
+            c.log.push({ q: v, a: body, tools: [...seen].filter(x => !x.startsWith('phase:')) });
+            const acts = [...seen].filter(x => !x.startsWith('phase:'));
+            c.history.push({ role:'user', content: v });
+            c.history.push({ role:'assistant', content: (body || '(no answer)') +
+              (acts.length ? '\n\n[tools used this turn: '+acts.join(', ')+']' : '') });
+            // The server path keeps memory in history.md and never reads this; only the
+            // hosted in-browser agent does, so keep it bounded.
+            if(c.history.length > 24) c.history.splice(0, c.history.length - 24);
+          }
         }
         if(thoughts && !think.classList.contains('done')){
           const secs = Math.max(1, Math.round((Date.now()-started)/1000));
@@ -322,7 +340,7 @@ function send(){
         if(!body && !failed && ev.type==='done' && ev.code) text.innerHTML =
           '<span class="err">The agent exited with code '+ev.code+'. Check the server log.</span>';
         abort=null; $('#send').textContent='Send'; $('#msgs').scrollTop=1e9;
-        setTurnBusy(false); saveSoon();
+        saveSoon();
       }
   };
 
@@ -348,7 +366,7 @@ function send(){
       if(stopped) return;
       abort = api.chat({ message: v, sessionId: c.sessionId, sessionDirId: currentId(),
                          resume: !!c.sessionId, ...rt, scratchDir: scratchDir(),
-                         useWorkflow: useWorkflow() }, handle);
+                         useWorkflow: useWorkflow(), router: router() }, handle);
     });
   }
 }
@@ -392,6 +410,7 @@ export function initChat(){
   $('#chatClose').onclick=()=>toggleChat(false);
   $('#newChat').onclick = ()=>{ if(abort){ abort(); abort=null; $('#send').textContent='Send'; }
                                makeChat(); $('#ask').focus(); };
+  $('#delChat').onclick = deleteChat;
   const stop = () => { if(abort){ abort(); abort=null; $('#send').textContent='Send'; } };
   $('#newProject').onclick = async () => {
     stop();

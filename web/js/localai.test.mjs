@@ -71,4 +71,21 @@ const { probe, samePageSpace } = await import('./localai.mjs');
   console.log('explicit denial ok');
 }
 
+/* ---- probe(baseUrl, apiKey) sends the key as a Bearer header ---- */
+{
+  setPage('http://127.0.0.1:5173');
+  setPermission('prompt');
+  let seenAuth;
+  globalThis.fetch = async (url, opts) => {
+    seenAuth = opts?.headers?.authorization;
+    return { ok: true, json: async () => ({ data: [] }) };
+  };
+  await probe('http://localhost:1234', 'secret-key');
+  assert.equal(seenAuth, 'Bearer secret-key', 'the API key reaches the model server');
+  await probe('http://localhost:1234');
+  assert.equal(seenAuth, undefined, 'no key set, no header sent');
+  console.log('probe forwards the API key ok');
+}
+
+refuseAll();
 console.log('localai.test.mjs ok');

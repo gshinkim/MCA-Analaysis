@@ -7,12 +7,20 @@ import { S } from './state.mjs';
 let ctlSig = '', ctl = {}, onChange = () => {};
 export const setOnChange = fn => { onChange = fn; };
 
+const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/* Rewrites `name = <lone number>` in place, and only that shape: a whole
+   statement (right after the start of the source or a `;`), whose right-hand
+   side is nothing but a number, not inside a comment. An expression
+   (`k1 = 2*k2`) or an assignment rule (`k1 := ...`) is left untouched instead
+   of corrupted, and a name is regex-escaped before use since Antimony ids can
+   contain regex metacharacters (`J.1`). */
 export function writeOnly(editor, name, v){
-  const re = new RegExp('(^|[^\\w$])(\\$?' + name + '\\s*=\\s*)(-?\\d*\\.?\\d+(?:[eE][-+]?\\d+)?)');
-  const t = editor.value;
-  editor.value = re.test(t)
-    ? t.replace(re, (m,a,b)=> a + b + numText(v))
-    : t.replace(/\s*$/,'') + '\n' + name + ' = ' + numText(v);
+  const n = reEsc(name), t = editor.value;
+  const re = new RegExp('((?:^|;)[ \\t]*(?:(?:const|var|species|compartment|parameter|formula)[ \\t]+)*\\$?' + n + '[ \\t]*=[ \\t]*)(-?\\d*\\.?\\d+(?:[eE][-+]?\\d+)?)(?=[ \\t]*(?:;|//|#|$))', 'm');
+  if (re.test(t)) editor.value = t.replace(re, (m, a) => a + numText(v));
+  else if (!new RegExp('(?:^|;)[ \\t]*(?:(?:const|var|species|compartment|parameter|formula)[ \\t]+)*\\$?' + n + '[ \\t]*:?=', 'm').test(t))
+    editor.value = t.replace(/\s*$/, '') + '\n' + name + ' = ' + numText(v);
 }
 
 function makeSlider(editor, key, name, value){
