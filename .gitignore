@@ -10,3 +10,10 @@ node_modules/
 workspace/model_candidate.txt
 __pycache__/
 *.pyc
+haiku.jsonl
+opus.jsonl
+sonnet.jsonl
+model_output_2_control_target.json
+audit*.txt
+Activation.txt
+train.log
